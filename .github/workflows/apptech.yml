@@ -29,6 +29,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
+      - run: python -m playwright install --with-deps chromium
       - name: Decide mode
         id: mode
         shell: bash
