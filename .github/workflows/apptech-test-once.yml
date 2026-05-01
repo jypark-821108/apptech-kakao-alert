@@ -25,3 +25,5 @@ jobs:
           KAKAO_REFRESH_TOKEN: ${{ secrets.KAKAO_REFRESH_TOKEN }}
           PLAYWRIGHT_HEADED: "1"
         run: xvfb-run -a python apptech_alert.py --mode noon
+
+# trigger: 2026-05-02T00:00:00+09:00
