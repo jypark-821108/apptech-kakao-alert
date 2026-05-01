@@ -75,13 +75,7 @@ def today() -> str:
 
 def date_markers() -> list[str]:
     d = now()
-    return [
-        d.strftime("%Y-%m-%d"),
-        f"{d.month}/{d.day}",
-        f"{d.month}/{d.day}일",
-        f"{d.month}월 {d.day}일",
-        f"{d.month}월{d.day}일",
-    ]
+    return [d.strftime("%Y-%m-%d"), f"{d.month}/{d.day}", f"{d.month}/{d.day}일", f"{d.month}월 {d.day}일", f"{d.month}월{d.day}일"]
 
 
 def compact(text: str) -> str:
@@ -116,11 +110,7 @@ def clean_answer(raw: str) -> str | None:
 
 def extract_answer(text: str) -> str | None:
     lines = [compact(x) for x in re.split(r"[\r\n]+", text or "") if compact(x)]
-    patterns = [
-        r"정답\s*[:：은는]?\s*(.+)$",
-        r"정답은\s*(.+)$",
-        r"답\s*[:：은는]?\s*(.+)$",
-    ]
+    patterns = [r"정답\s*[:：은는]?\s*(.+)$", r"정답은\s*(.+)$", r"답\s*[:：은는]?\s*(.+)$"]
     for line in lines:
         for pattern in patterns:
             m = re.search(pattern, line, flags=re.I)
@@ -162,9 +152,7 @@ def extract_english_sentences(text: str) -> str | None:
             continue
         if sent not in seen:
             seen.append(sent)
-    if seen:
-        return " / ".join(seen[:3])
-    return None
+    return " / ".join(seen[:3]) if seen else None
 
 
 def parse_fm_posts(page_html: str) -> list[tuple[str, str]]:
@@ -177,8 +165,7 @@ def parse_fm_posts(page_html: str) -> list[tuple[str, str]]:
         link = cell.select_one('a[href^="/"]')
         if not link:
             continue
-        href = link.get("href", "")
-        m = re.search(r"/(\d+)$", href.split("?")[0])
+        m = re.search(r"/(\d+)$", link.get("href", "").split("?")[0])
         title = compact(link.get_text(" ", strip=True))
         if m and title:
             posts.append((m.group(1), title))
@@ -204,21 +191,8 @@ def collect_fmkorea() -> dict[str, str]:
     answers = {item: UNKNOWN for item in ITEMS}
     headed = os.environ.get("PLAYWRIGHT_HEADED") == "1"
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=not headed,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                "--no-sandbox",
-            ],
-        )
-        context = browser.new_context(
-            locale="ko-KR",
-            timezone_id="Asia/Seoul",
-            user_agent=HEADERS["User-Agent"],
-            viewport={"width": 1365, "height": 900},
-            extra_http_headers={"Accept-Language": HEADERS["Accept-Language"]},
-        )
+        browser = p.chromium.launch(headless=not headed, args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--no-sandbox"])
+        context = browser.new_context(locale="ko-KR", timezone_id="Asia/Seoul", user_agent=HEADERS["User-Agent"], viewport={"width": 1365, "height": 900}, extra_http_headers={"Accept-Language": HEADERS["Accept-Language"]})
         context.add_init_script("""
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
 Object.defineProperty(navigator, 'languages', {get: () => ['ko-KR', 'ko', 'en-US', 'en']});
@@ -233,8 +207,7 @@ window.chrome = window.chrome || { runtime: {} };
                 print("FMKorea board remained blocked. body snippet:", compact(board_text[:500]))
                 return answers
             posts = parse_fm_posts(page.content())
-            matched = [(pid, title) for pid, title in posts if any(title_match(title, FM_KEYS[item]) for item in ITEMS)]
-            print("FMKorea matched posts:", matched[:30])
+            print("FMKorea matched posts:", [(pid, title) for pid, title in posts if any(title_match(title, FM_KEYS[item]) for item in ITEMS)][:30])
             for item in ITEMS:
                 matches = [(pid, title) for pid, title in posts if title_match(title, FM_KEYS[item])][:4]
                 if item == "신한퀴즈":
@@ -291,18 +264,16 @@ def parse_ppomppu_links(html_text: str) -> list[tuple[str, str]]:
             continue
         m = re.search(r"(?:\?|&)no=(\d+)", href)
         title = compact(link.get_text(" ", strip=True))
-        if not m or not title or len(title) <= 2:
-            continue
-        pair = (m.group(1), title)
-        if pair not in posts:
-            posts.append(pair)
+        if m and title and len(title) > 2:
+            pair = (m.group(1), title)
+            if pair not in posts:
+                posts.append(pair)
     return posts
 
 
 def ppomppu_candidates(item: str) -> list[tuple[str, str]]:
     posts: list[tuple[str, str]] = []
-    keywords = [" ".join(group) for group in PP_KEYS[item]]
-    urls = [PP_BOARD] + [PP_SEARCH.format(quote_plus(k)) for k in keywords]
+    urls = [PP_BOARD] + [PP_SEARCH.format(quote_plus(" ".join(group))) for group in PP_KEYS[item]]
     for url in urls:
         try:
             found = parse_ppomppu_links(req(url))
@@ -337,8 +308,7 @@ def ocr_image_answer(url: str | None) -> str | None:
     try:
         res = requests.get(url, headers={**HEADERS, "Referer": "https://www.ppomppu.co.kr/"}, timeout=20)
         res.raise_for_status()
-        img = Image.open(BytesIO(res.content))
-        text = pytesseract.image_to_string(img, lang="eng")
+        text = pytesseract.image_to_string(Image.open(BytesIO(res.content)), lang="eng")
         print("OCR text:", compact(text[:500]))
         return extract_answer(text) or extract_english_sentences(text)
     except Exception as exc:
@@ -349,12 +319,9 @@ def ocr_image_answer(url: str | None) -> str | None:
 def ppomppu_answer(pid: str, item: str | None = None) -> str | None:
     try:
         soup = BeautifulSoup(req(PP_POST.format(pid)), "html.parser")
-        desc = ""
         meta = soup.select_one('meta[name="description"]') or soup.select_one('meta[property="og:description"]')
-        if meta:
-            desc = meta.get("content", "")
-        text = soup.get_text("\n", strip=True)
-        ans = extract_answer(desc + "\n" + text)
+        desc = meta.get("content", "") if meta else ""
+        ans = extract_answer(desc + "\n" + soup.get_text("\n", strip=True))
         if not ans and item == "모니모 영어 퀴즈":
             ans = ocr_image_answer(image_url_from_soup(soup))
         print(f"Ppomppu post {pid} answer: {ans}")
@@ -409,7 +376,11 @@ def save_status(answers: dict[str, str], checked_at: str) -> None:
 
 def build_message(answers: dict[str, str], mode: str) -> str:
     title = "오늘의 앱테크 퀴즈 정답" + (" 오후 6시 재확인" if mode == "retry" else "")
-    return "\n".join([title, today(), ""] + [f"{item} 정답 : {answers[item]}" for item in ITEMS])
+    lines = [title, today(), ""]
+    for item in ITEMS:
+        label = "모니모 영어 퀴즈 오늘 표현" if item == "모니모 영어 퀴즈" else f"{item} 정답"
+        lines.append(f"{label} : {answers[item]}")
+    return "\n".join(lines)
 
 
 def main() -> None:
