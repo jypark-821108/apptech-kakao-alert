@@ -4,11 +4,19 @@ import json
 import os
 import re
 from datetime import datetime, timezone, timedelta
+from io import BytesIO
 from urllib.parse import quote_plus
 
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
+
+try:
+    from PIL import Image
+    import pytesseract
+except Exception:
+    Image = None
+    pytesseract = None
 
 from kakao import send_kakao
 
@@ -98,7 +106,7 @@ def clean_answer(raw: str) -> str | None:
     value = compact(raw)
     value = re.split(r"(?:입니다|입니당|참고|출처|댓글|추천|조회|스크랩|정답 입력 전|모든 분들|즐거운|감사|\||<)", value)[0]
     value = compact(value)
-    if not value or len(value) > 80:
+    if not value or len(value) > 120:
         return None
     bad_words = ["확인", "퀴즈", "정답", "게시판", "링크", "댓글", "본문", "쿠폰", "참여", "이미지"]
     if any(bad in value for bad in bad_words):
@@ -120,13 +128,42 @@ def extract_answer(text: str) -> str | None:
                 ans = clean_answer(m.group(1))
                 if ans:
                     return ans
+    for i, line in enumerate(lines):
+        if re.fullmatch(r"(?:정답|답)\s*[:：]?", line, flags=re.I):
+            pieces: list[str] = []
+            for nxt in lines[i + 1:i + 4]:
+                if any(stop in nxt for stop in ["참고", "댓글", "추천", "조회", "스크랩", "안녕하세요"]):
+                    break
+                cand = clean_answer(nxt)
+                if cand:
+                    pieces.append(cand)
+                if len(" ".join(pieces)) >= 2:
+                    ans = clean_answer(" ".join(pieces))
+                    if ans:
+                        return ans
     one = compact(text)
-    for pattern in [r"정답\s*[:：은는]?\s*([^。!?]{1,80})", r"정답은\s*([^。!?]{1,80})"]:
+    for pattern in [r"정답\s*[:：은는]?\s*([^。!?]{1,100})", r"정답은\s*([^。!?]{1,100})"]:
         m = re.search(pattern, one, flags=re.I)
         if m:
             ans = clean_answer(m.group(1))
             if ans:
                 return ans
+    return None
+
+
+def extract_english_sentences(text: str) -> str | None:
+    fixed = text.replace("|", "I").replace("\n", " ")
+    fixed = re.sub(r"\s+", " ", fixed)
+    candidates = re.findall(r"\b(?:I|There|This|That|You|We|They|He|She)[A-Za-z0-9' ,;-]{3,90}[.!?]", fixed)
+    seen: list[str] = []
+    for sent in candidates:
+        sent = compact(sent)
+        if any(noise in sent.lower() for noise in ["google", "cookie", "script", "ppomppu"]):
+            continue
+        if sent not in seen:
+            seen.append(sent)
+    if seen:
+        return " / ".join(seen[:3])
     return None
 
 
@@ -284,7 +321,32 @@ def ppomppu_candidates(item: str) -> list[tuple[str, str]]:
     return filtered[:8]
 
 
-def ppomppu_answer(pid: str) -> str | None:
+def image_url_from_soup(soup: BeautifulSoup) -> str | None:
+    meta = soup.select_one('meta[property="og:image"]')
+    if not meta:
+        return None
+    url = meta.get("content", "").strip()
+    if url.startswith("//"):
+        url = "https:" + url
+    return url or None
+
+
+def ocr_image_answer(url: str | None) -> str | None:
+    if not url or Image is None or pytesseract is None:
+        return None
+    try:
+        res = requests.get(url, headers={**HEADERS, "Referer": "https://www.ppomppu.co.kr/"}, timeout=20)
+        res.raise_for_status()
+        img = Image.open(BytesIO(res.content))
+        text = pytesseract.image_to_string(img, lang="eng")
+        print("OCR text:", compact(text[:500]))
+        return extract_answer(text) or extract_english_sentences(text)
+    except Exception as exc:
+        print("OCR failed:", repr(exc))
+        return None
+
+
+def ppomppu_answer(pid: str, item: str | None = None) -> str | None:
     try:
         soup = BeautifulSoup(req(PP_POST.format(pid)), "html.parser")
         desc = ""
@@ -293,6 +355,8 @@ def ppomppu_answer(pid: str) -> str | None:
             desc = meta.get("content", "")
         text = soup.get_text("\n", strip=True)
         ans = extract_answer(desc + "\n" + text)
+        if not ans and item == "모니모 영어 퀴즈":
+            ans = ocr_image_answer(image_url_from_soup(soup))
         print(f"Ppomppu post {pid} answer: {ans}")
         return ans
     except Exception as exc:
@@ -310,7 +374,7 @@ def collect_ppomppu(existing: dict[str, str]) -> dict[str, str]:
             parts = []
             seen_labels = set()
             for pid, title in candidates:
-                ans = ppomppu_answer(pid)
+                ans = ppomppu_answer(pid, item)
                 if not ans:
                     continue
                 label = "쏠" if "쏠" in title else "팡팡" if "팡팡" in title else "출석" if "출석" in title or "슈퍼SOL" in title else "신한"
@@ -322,7 +386,7 @@ def collect_ppomppu(existing: dict[str, str]) -> dict[str, str]:
                 answers[item] = " / ".join(parts)
             continue
         for pid, _ in candidates:
-            ans = ppomppu_answer(pid)
+            ans = ppomppu_answer(pid, item)
             if ans:
                 answers[item] = ans
                 break
