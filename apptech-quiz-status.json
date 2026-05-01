@@ -1,14 +1,6 @@
 {
   "date": "2026-05-01",
-  "all_found": false,
-  "missing_items": [
-    "신한퀴즈",
-    "모니모 영어 퀴즈",
-    "KB Pay 퀴즈",
-    "KB 스타퀴즈",
-    "올원뱅크 디깅퀴즈",
-    "하나원큐 축구Play 퀴즈",
-    "하나원큐 OX퀴즈"
-  ],
+  "all_found": true,
+  "missing_items": [],
   "checked_at": "12:00"
 }
