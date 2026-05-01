@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 import html
 import re
 import xml.etree.ElementTree as ET
@@ -16,15 +16,15 @@ HEADERS = {
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.7,en;q=0.6",
 }
 
-RSS_QUERIES = [
-    "용인시 when:1d",
-    "용인특례시 when:1d",
-    "용인 처인구 when:1d",
-    "용인 모현 when:7d",
-    "모현읍 when:7d",
-    "처인구 모현읍 when:7d",
+BASE_QUERIES = [
+    "용인시",
+    "용인특례시",
+    "용인 처인구",
+    "용인 모현",
+    "모현읍",
+    "처인구 모현읍",
 ]
-
+GOOGLE_QUERIES = [q + " when:1d" for q in BASE_QUERIES[:3]] + [q + " when:7d" for q in BASE_QUERIES[3:]]
 REGION_WORDS = ["용인", "용인시", "용인특례시", "처인", "모현", "모현읍"]
 PRESS_RELEASE_HINTS = [
     "보도자료",
@@ -56,17 +56,21 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^0-9A-Za-z가-힣 ]", " ", compact(text))).strip().lower()
 
 
+def strip_html(text: str) -> str:
+    return compact(BeautifulSoup(text or "", "html.parser").get_text(" ", strip=True))
+
+
+def source_from_url(url: str) -> str:
+    host = urlparse(url).netloc.replace("www.", "")
+    return host or "출처 확인 필요"
+
+
 def split_title_source(title: str) -> tuple[str, str]:
     title = compact(title)
     if " - " in title:
         head, source = title.rsplit(" - ", 1)
         return compact(head), compact(source)
     return title, "출처 확인 필요"
-
-
-def strip_html(text: str) -> str:
-    soup = BeautifulSoup(text or "", "html.parser")
-    return compact(soup.get_text(" ", strip=True))
 
 
 def parse_pubdate(value: str) -> datetime | None:
@@ -79,34 +83,129 @@ def parse_pubdate(value: str) -> datetime | None:
         return None
 
 
-def google_news_rss(query: str) -> list[dict]:
+def parse_portal_date(text: str) -> datetime | None:
+    text = compact(text)
+    current = now()
+    if re.search(r"\d+\s*(분|시간)\s*전", text):
+        return current
+    if "오늘" in text:
+        return current
+    if "어제" in text or re.search(r"\d+\s*일\s*전", text):
+        return current - timedelta(days=1)
+    m = re.search(r"(20\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})", text)
+    if m:
+        return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), tzinfo=KST)
+    m = re.search(r"(\d{1,2})[.\-/](\d{1,2})", text)
+    if m:
+        return datetime(current.year, int(m.group(1)), int(m.group(2)), tzinfo=KST)
+    return None
+
+
+def fetch(url: str) -> str:
+    res = requests.get(url, headers=HEADERS, timeout=20)
+    res.raise_for_status()
+    if not res.encoding or res.encoding.lower() in {"iso-8859-1", "ascii"}:
+        res.encoding = res.apparent_encoding
+    return res.text
+
+
+def google_news(query: str) -> list[dict]:
     url = "https://news.google.com/rss/search?q=" + quote_plus(query) + "&hl=ko&gl=KR&ceid=KR:ko"
     try:
-        res = requests.get(url, headers=HEADERS, timeout=20)
-        res.raise_for_status()
+        root = ET.fromstring(requests.get(url, headers=HEADERS, timeout=20).content)
     except Exception as exc:
-        print("Google News RSS failed:", query, repr(exc))
+        print("Google News failed:", query, repr(exc))
         return []
-
-    rows: list[dict] = []
-    root = ET.fromstring(res.content)
+    rows = []
     for item in root.findall("./channel/item")[:20]:
-        raw_title = item.findtext("title", "")
-        title, source = split_title_source(raw_title)
-        pub = parse_pubdate(item.findtext("pubDate", ""))
-        snippet = strip_html(item.findtext("description", ""))
+        title, source = split_title_source(item.findtext("title", ""))
         link = compact(item.findtext("link", ""))
         if title:
-            rows.append({"title": title, "source": source, "snippet": snippet, "link": link, "published": pub, "query": query})
-    print(f"Google News results for {query}: {len(rows)}")
+            rows.append({
+                "title": title,
+                "source": source,
+                "snippet": strip_html(item.findtext("description", "")),
+                "link": link,
+                "published": parse_pubdate(item.findtext("pubDate", "")),
+                "channel": "Google",
+                "query": query,
+            })
+    print(f"Google results for {query}: {len(rows)}")
+    return rows
+
+
+def naver_news(query: str) -> list[dict]:
+    url = "https://search.naver.com/search.naver?where=news&sort=1&pd=4&query=" + quote_plus(query)
+    try:
+        soup = BeautifulSoup(fetch(url), "html.parser")
+    except Exception as exc:
+        print("Naver News failed:", query, repr(exc))
+        return []
+    rows = []
+    for area in soup.select("div.news_area, div.sds-comps-vertical-layout")[:20]:
+        link = area.select_one("a.news_tit") or area.select_one('a[href*="http"]')
+        if not link:
+            continue
+        title = compact(link.get("title") or link.get_text(" ", strip=True))
+        href = link.get("href", "")
+        snippet_el = area.select_one("div.news_dsc") or area.select_one(".api_txt_lines") or area
+        source_el = area.select_one("a.info.press") or area.select_one("span.info.press")
+        source = compact(source_el.get_text(" ", strip=True)) if source_el else source_from_url(href)
+        pub = parse_portal_date(area.get_text(" ", strip=True))
+        if title and href:
+            rows.append({"title": title, "source": source, "snippet": compact(snippet_el.get_text(" ", strip=True)), "link": href, "published": pub, "channel": "Naver", "query": query})
+    print(f"Naver results for {query}: {len(rows)}")
+    return rows
+
+
+def daum_news(query: str) -> list[dict]:
+    url = "https://search.daum.net/search?w=news&sort=recency&q=" + quote_plus(query)
+    try:
+        soup = BeautifulSoup(fetch(url), "html.parser")
+    except Exception as exc:
+        print("Daum News failed:", query, repr(exc))
+        return []
+    rows = []
+    blocks = soup.select("div.item-bundle, div.c-item-content, li, div.wrap_cont")
+    for area in blocks[:40]:
+        link = area.select_one('a[href*="http"]')
+        if not link:
+            continue
+        title = compact(link.get("title") or link.get_text(" ", strip=True))
+        href = link.get("href", "")
+        text = compact(area.get_text(" ", strip=True))
+        if len(title) < 6 or "뉴스" == title:
+            continue
+        rows.append({"title": title, "source": source_from_url(href), "snippet": text, "link": href, "published": parse_portal_date(text), "channel": "Daum", "query": query})
+    print(f"Daum results for {query}: {len(rows)}")
+    return rows
+
+
+def zum_news(query: str) -> list[dict]:
+    url = "https://search.zum.com/search.zum?method=news&option=date&query=" + quote_plus(query)
+    try:
+        soup = BeautifulSoup(fetch(url), "html.parser")
+    except Exception as exc:
+        print("Zum News failed:", query, repr(exc))
+        return []
+    rows = []
+    for area in soup.select("div.news_wrap, li, div.cont")[:50]:
+        link = area.select_one('a[href*="http"]')
+        if not link:
+            continue
+        title = compact(link.get("title") or link.get_text(" ", strip=True))
+        href = link.get("href", "")
+        text = compact(area.get_text(" ", strip=True))
+        if len(title) < 6 or "뉴스" == title:
+            continue
+        rows.append({"title": title, "source": source_from_url(href), "snippet": text, "link": href, "published": parse_portal_date(text), "channel": "Zum", "query": query})
+    print(f"Zum results for {query}: {len(rows)}")
     return rows
 
 
 def is_target_date(article: dict) -> bool:
     pub = article.get("published")
-    if not pub:
-        return False
-    return pub.strftime("%Y-%m-%d") == today()
+    return bool(pub and pub.strftime("%Y-%m-%d") == today())
 
 
 def is_region_article(article: dict) -> bool:
@@ -121,24 +220,25 @@ def similarity_key(title: str) -> str:
 
 def likely_press_release(article: dict, duplicate_sources: int) -> bool:
     text = article["title"] + " " + article["snippet"] + " " + article.get("link", "")
-    if any(hint in text for hint in PRESS_RELEASE_HINTS):
-        return True
-    if duplicate_sources >= 3:
-        return True
-    return False
+    return any(hint in text for hint in PRESS_RELEASE_HINTS) or duplicate_sources >= 3
 
 
 def collect_articles() -> tuple[list[dict], list[dict]]:
     raw: list[dict] = []
-    for query in RSS_QUERIES:
-        raw.extend(google_news_rss(query))
+    for query in GOOGLE_QUERIES:
+        raw.extend(google_news(query))
+    for query in BASE_QUERIES:
+        raw.extend(naver_news(query))
+        raw.extend(daum_news(query))
+        raw.extend(zum_news(query))
 
     candidates: list[dict] = []
     seen_links = set()
     for article in raw:
-        if article["link"] in seen_links:
+        link_key = article.get("link") or normalize(article["title"])
+        if link_key in seen_links:
             continue
-        seen_links.add(article["link"])
+        seen_links.add(link_key)
         if not is_target_date(article):
             continue
         if not is_region_article(article):
@@ -166,9 +266,9 @@ def collect_articles() -> tuple[list[dict], list[dict]]:
 
     included.sort(key=lambda x: x.get("published") or datetime.min.replace(tzinfo=KST), reverse=True)
     excluded.sort(key=lambda x: x.get("published") or datetime.min.replace(tzinfo=KST), reverse=True)
-    print("Included local news:", [(a["published"].isoformat() if a.get("published") else "", a["source"], a["title"]) for a in included])
-    print("Excluded local news:", [(a["published"].isoformat() if a.get("published") else "", a["source"], a["title"]) for a in excluded[:10]])
-    return included[:5], excluded[:5]
+    print("Included local news:", [(a["channel"], a["published"].isoformat() if a.get("published") else "", a["source"], a["title"]) for a in included])
+    print("Excluded local news:", [(a["channel"], a["published"].isoformat() if a.get("published") else "", a["source"], a["title"]) for a in excluded[:10]])
+    return included[:6], excluded[:6]
 
 
 def article_line(article: dict, index: int) -> list[str]:
@@ -177,7 +277,7 @@ def article_line(article: dict, index: int) -> list[str]:
     summary = article["snippet"] or "요약을 확인할 수 없습니다."
     return [
         f"{index}. {article['title']}",
-        f"매체 : {article['source']} / {time_text}",
+        f"매체 : {article['source']} / {time_text} / {article['channel']}",
         f"핵심 : {summary[:150]}",
         "",
     ]
@@ -198,16 +298,17 @@ def build_message(articles: list[dict], excluded: list[dict]) -> str:
         for article in excluded[:3]:
             pub = article.get("published")
             time_text = pub.strftime("%H:%M") if pub else "시간 확인 필요"
-            lines.append(f"- {article['title']} ({article['source']} / {time_text})")
+            lines.append(f"- {article['title']} ({article['source']} / {time_text} / {article['channel']})")
         lines.append("")
 
+    lines.append(f"검색원: Google·Naver·Daum·Zum")
     lines.append(f"제외한 보도자료·중복성 기사: {len(excluded)}건")
     return "\n".join(lines).strip()
 
 
 def main() -> None:
     articles, excluded = collect_articles()
-    send_kakao(build_message(articles, excluded), link="https://news.google.com/search?q=%EC%9A%A9%EC%9D%B8%EC%8B%9C")
+    send_kakao(build_message(articles, excluded), link="https://search.naver.com/search.naver?where=news&query=%EC%9A%A9%EC%9D%B8%EC%8B%9C")
 
 
 if __name__ == "__main__":
