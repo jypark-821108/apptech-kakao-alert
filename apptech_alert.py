@@ -5,7 +5,6 @@ import os
 import re
 from datetime import datetime, timezone, timedelta
 
-import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
@@ -51,24 +50,12 @@ def today() -> str:
     return now_kst().strftime("%Y-%m-%d")
 
 
-def today_markers() -> list[str]:
-    d = now_kst()
-    return [f"{d.month}/{d.day}", f"{d.month}월{d.day}일", f"{d.month}월 {d.day}일", d.strftime("%m/%d")]
-
-
 def compact(value: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(value)).strip(" -:：[]()'\".,")
 
 
-def request_text(url: str) -> str:
-    res = requests.get(url, headers=HEADERS, timeout=15)
-    res.raise_for_status()
-    return res.text
-
-
-def board_posts() -> list[tuple[str, str]]:
-    page = request_text(FM_BOARD)
-    soup = BeautifulSoup(page, "html.parser")
+def parse_board_posts(html_text: str) -> list[tuple[str, str]]:
+    soup = BeautifulSoup(html_text, "html.parser")
     posts: list[tuple[str, str]] = []
     for row in soup.select("table.bd_lst tbody tr"):
         title_cell = row.select_one("td.title")
@@ -103,7 +90,6 @@ def clean_answer(raw: str) -> str | None:
 
 
 def extract_answer_from_text(text: str) -> str | None:
-    # Keep line breaks first; FMKorea posts often use one answer per line.
     lines = [compact(line) for line in re.split(r"[\r\n]+", text) if compact(line)]
     for line in lines:
         for pattern in [r"정답\s*[:：은는]?\s*(.+)$", r"답\s*[:：은는]?\s*(.+)$"]:
@@ -122,10 +108,19 @@ def extract_answer_from_text(text: str) -> str | None:
     return None
 
 
-def browser_texts(post_ids: list[str]) -> dict[str, str]:
-    if not post_ids:
-        return {}
-    result: dict[str, str] = {}
+def wait_past_security(page) -> None:
+    for _ in range(4):
+        text = page.locator("body").inner_text(timeout=10000)
+        if "에펨코리아 보안 시스템" not in text:
+            return
+        page.wait_for_timeout(4000)
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=30000)
+        except Exception:
+            pass
+
+
+def fetch_board_and_posts() -> tuple[list[tuple[str, str]], dict[str, str]]:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -134,36 +129,39 @@ def browser_texts(post_ids: list[str]) -> dict[str, str]:
             extra_http_headers={"Accept-Language": HEADERS["Accept-Language"]},
         )
         page = context.new_page()
-        # Visit board first so FMKorea can set its browser-check cookies before individual posts.
         page.goto(FM_BOARD, wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(3500)
+        wait_past_security(page)
+        board_html = page.content()
+        posts = parse_board_posts(board_html)
+
+        post_ids: list[str] = []
+        for item in ITEMS:
+            for post_id, title in posts:
+                if title_matches(item, title) and post_id not in post_ids:
+                    post_ids.append(post_id)
+                if len(post_ids) >= 20:
+                    break
+
+        texts: dict[str, str] = {}
         for post_id in post_ids:
             try:
                 page.goto(FM_POST.format(post_id), wait_until="domcontentloaded", timeout=30000)
                 page.wait_for_timeout(3500)
-                text = page.locator("body").inner_text(timeout=10000)
-                if "에펨코리아 보안 시스템" in text:
-                    page.wait_for_timeout(5000)
-                    text = page.locator("body").inner_text(timeout=10000)
-                result[post_id] = text
+                wait_past_security(page)
+                texts[post_id] = page.locator("body").inner_text(timeout=10000)
             except Exception as exc:
-                result[post_id] = f"FETCH_ERROR: {exc}"
+                texts[post_id] = f"FETCH_ERROR: {exc}"
         browser.close()
-    return result
+        return posts, texts
 
 
 def collect_answers() -> dict[str, str]:
-    posts = board_posts()
+    posts, texts = fetch_board_and_posts()
     matched_by_item: dict[str, list[tuple[str, str]]] = {}
-    post_ids: list[str] = []
     for item in ITEMS:
-        matches = [(post_id, title) for post_id, title in posts if title_matches(item, title)]
-        matched_by_item[item] = matches[:4]
-        for post_id, _ in matches[:4]:
-            if post_id not in post_ids:
-                post_ids.append(post_id)
+        matched_by_item[item] = [(post_id, title) for post_id, title in posts if title_matches(item, title)][:4]
 
-    texts = browser_texts(post_ids)
     answers = {item: UNKNOWN for item in ITEMS}
     for item, matches in matched_by_item.items():
         if item == "신한퀴즈":
