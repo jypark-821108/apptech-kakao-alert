@@ -4,18 +4,18 @@ import json
 import os
 import re
 from datetime import datetime, timezone, timedelta
-from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 from kakao import send_kakao
 
 KST = timezone(timedelta(hours=9))
 STATUS_FILE = "apptech-quiz-status.json"
 UNKNOWN = "아직 확인 안 됨"
-PPOMPPU_BOARD = "https://www.ppomppu.co.kr/zboard/zboard.php?id=coupon"
-PPOMPPU_VIEW = "https://www.ppomppu.co.kr/zboard/view.php?id=coupon&no={}"
+FM_BOARD = "https://www.fmkorea.com/freedeal"
+FM_POST = "https://www.fmkorea.com/{}"
 
 ITEMS = [
     "신한퀴즈",
@@ -28,11 +28,11 @@ ITEMS = [
 ]
 
 TITLE_KEYWORDS = {
-    "신한퀴즈": ["신한슈퍼SOL", "신한플레이", "신한쏠"],
-    "모니모 영어 퀴즈": ["모니모", "영어"],
-    "KB Pay 퀴즈": ["KB Pay", "오늘의 퀴즈"],
-    "KB 스타퀴즈": ["KB스타뱅킹", "스타퀴즈"],
-    "올원뱅크 디깅퀴즈": ["NH올원뱅크", "디깅퀴즈"],
+    "신한퀴즈": ["신한퀴즈"],
+    "모니모 영어 퀴즈": ["모니모", "영어", "퀴즈"],
+    "KB Pay 퀴즈": ["KB Pay", "퀴즈"],
+    "KB 스타퀴즈": ["kb", "스타퀴즈"],
+    "올원뱅크 디깅퀴즈": ["올원뱅크", "디깅퀴즈"],
     "하나원큐 축구Play 퀴즈": ["하나원큐", "축구"],
     "하나원큐 OX퀴즈": ["하나원큐", "OX퀴즈"],
 }
@@ -51,42 +51,69 @@ def today() -> str:
     return now_kst().strftime("%Y-%m-%d")
 
 
-def today_tokens() -> list[str]:
+def today_markers() -> list[str]:
     d = now_kst()
-    return [f"{d.month}/{d.day}", f"{d.month}월 {d.day}일", d.strftime("%y%m%d")]
-
-
-def request_text(url: str) -> str:
-    res = requests.get(url, headers=HEADERS, timeout=12)
-    res.raise_for_status()
-    # Ppomppu is EUC-KR. requests usually detects it, but force apparent encoding when needed.
-    if not res.encoding or res.encoding.lower() in {"iso-8859-1", "ascii"}:
-        res.encoding = res.apparent_encoding
-    return res.text
+    return [f"{d.month}/{d.day}", f"{d.month}월{d.day}일", f"{d.month}월 {d.day}일", d.strftime("%m/%d")]
 
 
 def compact(value: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(value)).strip(" -:：[]()'\".,")
 
 
+def request_text(url: str) -> str:
+    res = requests.get(url, headers=HEADERS, timeout=15)
+    res.raise_for_status()
+    return res.text
+
+
+def board_posts() -> list[tuple[str, str]]:
+    page = request_text(FM_BOARD)
+    soup = BeautifulSoup(page, "html.parser")
+    posts: list[tuple[str, str]] = []
+    for row in soup.select("table.bd_lst tbody tr"):
+        title_cell = row.select_one("td.title")
+        if not title_cell:
+            continue
+        link = title_cell.select_one('a[href^="/"]')
+        if not link:
+            continue
+        href = link.get("href", "")
+        match = re.search(r"/(\d+)$", href.split("?")[0])
+        title = compact(link.get_text(" ", strip=True))
+        if match and title:
+            posts.append((match.group(1), title))
+    return posts
+
+
+def title_matches(item: str, title: str) -> bool:
+    normalized = title.lower().replace(" ", "")
+    keywords = [k.lower().replace(" ", "") for k in TITLE_KEYWORDS[item]]
+    return all(k in normalized for k in keywords)
+
+
 def clean_answer(raw: str) -> str | None:
     value = compact(raw)
-    value = re.split(r"(?:PS\.|ps\.|참고|정답 입력 전|모든 분들|즐거운|감사|<|\||\n)", value)[0]
+    value = re.split(r"(?:입니다|입니당|참고|출처|댓글|추천|조회|스크랩|\||/|<)", value)[0]
     value = compact(value)
-    if not value or len(value) > 40:
+    if not value or len(value) > 50:
         return None
-    if any(bad in value for bad in ["확인", "퀴즈", "정답", "링크", "게시판", "쿠폰"]):
+    if any(bad in value for bad in ["확인", "퀴즈", "정답", "게시판", "링크", "댓글", "본문"]):
         return None
     return value
 
 
 def extract_answer_from_text(text: str) -> str | None:
+    # Keep line breaks first; FMKorea posts often use one answer per line.
+    lines = [compact(line) for line in re.split(r"[\r\n]+", text) if compact(line)]
+    for line in lines:
+        for pattern in [r"정답\s*[:：은는]?\s*(.+)$", r"답\s*[:：은는]?\s*(.+)$"]:
+            match = re.search(pattern, line, flags=re.IGNORECASE)
+            if match:
+                answer = clean_answer(match.group(1))
+                if answer:
+                    return answer
     normalized = compact(text)
-    patterns = [
-        r"정답\s*[:：은는]?\s*([^\r\n。.!?]{1,60})",
-        r"정답은\s*([^\r\n。.!?]{1,60})",
-    ]
-    for pattern in patterns:
+    for pattern in [r"정답\s*[:：은는]?\s*([^。.!?]{1,60})", r"답\s*[:：은는]?\s*([^。.!?]{1,60})"]:
         match = re.search(pattern, normalized, flags=re.IGNORECASE)
         if match:
             answer = clean_answer(match.group(1))
@@ -95,75 +122,72 @@ def extract_answer_from_text(text: str) -> str | None:
     return None
 
 
-def post_text(no: str) -> tuple[str, str, str]:
-    page = request_text(PPOMPPU_VIEW.format(no))
-    soup = BeautifulSoup(page, "html.parser")
-    title = ""
-    title_meta = soup.select_one('meta[property="og:title"]')
-    if title_meta:
-        title = title_meta.get("content", "")
-    desc = ""
-    desc_meta = soup.select_one('meta[name="description"]') or soup.select_one('meta[property="og:description"]')
-    if desc_meta:
-        desc = desc_meta.get("content", "")
-    body = soup.get_text("\n", strip=True)
-    return compact(title), compact(desc), body
-
-
-def board_posts() -> list[tuple[str, str]]:
-    page = request_text(PPOMPPU_BOARD)
-    soup = BeautifulSoup(page, "html.parser")
-    posts: list[tuple[str, str]] = []
-    for link in soup.select('a[href*="view.php?id=coupon&no="]'):
-        href = link.get("href", "")
-        match = re.search(r"no=(\d+)", href)
-        title = compact(link.get_text(" ", strip=True))
-        if match and title:
-            pair = (match.group(1), title)
-            if pair not in posts:
-                posts.append(pair)
-    return posts[:80]
-
-
-def title_matches(item: str, title: str) -> bool:
-    keywords = TITLE_KEYWORDS[item]
-    if item == "신한퀴즈":
-        return any(k in title for k in keywords) and "정답" in title
-    return all(k in title for k in keywords) and "정답" in title
+def browser_texts(post_ids: list[str]) -> dict[str, str]:
+    if not post_ids:
+        return {}
+    result: dict[str, str] = {}
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            locale="ko-KR",
+            user_agent=HEADERS["User-Agent"],
+            extra_http_headers={"Accept-Language": HEADERS["Accept-Language"]},
+        )
+        page = context.new_page()
+        # Visit board first so FMKorea can set its browser-check cookies before individual posts.
+        page.goto(FM_BOARD, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(3500)
+        for post_id in post_ids:
+            try:
+                page.goto(FM_POST.format(post_id), wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(3500)
+                text = page.locator("body").inner_text(timeout=10000)
+                if "에펨코리아 보안 시스템" in text:
+                    page.wait_for_timeout(5000)
+                    text = page.locator("body").inner_text(timeout=10000)
+                result[post_id] = text
+            except Exception as exc:
+                result[post_id] = f"FETCH_ERROR: {exc}"
+        browser.close()
+    return result
 
 
 def collect_answers() -> dict[str, str]:
     posts = board_posts()
-    answers = {item: UNKNOWN for item in ITEMS}
-
+    matched_by_item: dict[str, list[tuple[str, str]]] = {}
+    post_ids: list[str] = []
     for item in ITEMS:
-        matched = [(no, title) for no, title in posts if title_matches(item, title)]
+        matches = [(post_id, title) for post_id, title in posts if title_matches(item, title)]
+        matched_by_item[item] = matches[:4]
+        for post_id, _ in matches[:4]:
+            if post_id not in post_ids:
+                post_ids.append(post_id)
+
+    texts = browser_texts(post_ids)
+    answers = {item: UNKNOWN for item in ITEMS}
+    for item, matches in matched_by_item.items():
         if item == "신한퀴즈":
             parts = []
-            for no, title in matched[:4]:
-                post_title, desc, body = post_text(no)
-                answer = extract_answer_from_text("\n".join([desc, body]))
+            for post_id, title in matches:
+                answer = extract_answer_from_text(texts.get(post_id, ""))
                 if not answer:
                     continue
                 label = "신한"
-                if "쏠" in post_title:
+                if "쏠" in title:
                     label = "쏠"
-                elif "팡팡" in post_title:
+                elif "팡팡" in title:
                     label = "팡팡"
-                elif "출석" in post_title or "슈퍼SOL" in post_title:
+                elif "출석" in title:
                     label = "출석"
                 parts.append(f"{label} {answer}")
             if parts:
                 answers[item] = " / ".join(parts)
             continue
-
-        for no, _title in matched[:3]:
-            post_title, desc, body = post_text(no)
-            answer = extract_answer_from_text("\n".join([desc, body]))
+        for post_id, _title in matches:
+            answer = extract_answer_from_text(texts.get(post_id, ""))
             if answer:
                 answers[item] = answer
                 break
-
     return answers
 
 
