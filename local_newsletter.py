@@ -129,11 +129,10 @@ def naver_news(query: str) -> list[dict]:
                 continue
             title = compact(link.get("title") or link.get_text(" ", strip=True))
             href = link.get("href", "")
-            snippet_el = area.select_one("div.news_dsc") or area.select_one(".api_txt_lines") or area
             source_el = area.select_one("a.info.press") or area.select_one("span.info.press")
             source = compact(source_el.get_text(" ", strip=True)) if source_el else source_from_url(href)
             if title and href:
-                rows.append({"title": title, "source": source, "snippet": compact(snippet_el.get_text(" ", strip=True)), "link": href, "published": parse_portal_date(area.get_text(" ", strip=True)), "channel": "Naver"})
+                rows.append({"title": title, "source": source, "snippet": compact(area.get_text(" ", strip=True)), "link": href, "published": parse_portal_date(area.get_text(" ", strip=True)), "channel": "Naver"})
         except Exception as exc:
             print("Naver item skipped:", repr(exc))
     print(f"Naver results for {query}: {len(rows)}")
@@ -234,33 +233,26 @@ def collect_articles() -> tuple[list[dict], list[dict]]:
     excluded.sort(key=lambda x: x.get("published") or datetime(1970, 1, 1, tzinfo=KST), reverse=True)
     print("Included local news:", [(a["channel"], a["published"].isoformat() if a.get("published") else "", a["source"], a["title"]) for a in included])
     print("Excluded local news:", [(a["channel"], a["published"].isoformat() if a.get("published") else "", a["source"], a["title"]) for a in excluded[:10]])
-    return included[:4], excluded[:4]
+    return included[:6], excluded[:4]
 
 
 def build_message(articles: list[dict], excluded: list[dict]) -> str:
-    lines = ["오늘의 용인시·모현읍 뉴스레터", today(), ""]
+    lines = ["용인·모현 오늘 뉴스", today(), ""]
     if articles:
-        lines.append("자체 기사로 볼 만한 내용")
         for i, article in enumerate(articles, 1):
             pub = article.get("published")
-            time_text = pub.strftime("%H:%M") if pub else "시간 확인 필요"
-            lines.append(f"{i}. {shorten(article['title'], 62)}")
-            lines.append(f"매체 : {shorten(article['source'], 22)} / {time_text} / {article['channel']}")
-            lines.append(f"핵심 : {shorten(article['snippet'], 82)}")
-            lines.append("")
+            time_text = pub.strftime("%H:%M") if pub else ""
+            media = shorten(article["source"], 18)
+            suffix = f" ({media}{', ' + time_text if time_text else ''})"
+            lines.append(f"{i}. {shorten(article['title'], 66)}")
+            lines.append(suffix)
     else:
         lines.append("오늘 확인된 자체 취재 추정 기사는 없습니다.")
-        lines.append("")
 
     if excluded:
-        lines.append("보도자료·중복성 제외")
-        for article in excluded[:2]:
-            lines.append(f"- {shorten(article['title'], 64)}")
         lines.append("")
-
-    lines.append("검색원: Google·Naver·Daum·Zum")
-    lines.append(f"제외 기사: {len(excluded)}건")
-    return shorten("\n".join(lines).strip(), 900)
+        lines.append(f"보도자료·중복 제외: {len(excluded)}건")
+    return shorten("\n".join(lines).strip(), 850)
 
 
 def main() -> None:
