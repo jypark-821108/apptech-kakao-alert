@@ -52,6 +52,26 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^0-9A-Za-z가-힣 ]", " ", compact(text))).strip().lower()
 
 
+def clean_title(text: str) -> str:
+    title = compact(text)
+    title = re.sub(r"\s*-\s*(네이버뉴스|다음뉴스|줌뉴스)$", "", title)
+    title = re.split(r"\s+(?:\d+분 전|\d+시간 전|오늘|어제|20\d{2}[.\-/]\d{1,2}[.\-/]\d{1,2})", title)[0]
+    title = re.split(r"\s+(?:관련뉴스|뉴스홈|댓글|공유|기사입력|입력|수정)\b", title)[0]
+    return compact(title)
+
+
+def valid_title(title: str) -> bool:
+    title = compact(title)
+    if len(title) < 8 or len(title) > 95:
+        return False
+    bad = ["뉴스", "이미지", "동영상", "검색", "바로가기", "구독", "로그인", "전체뉴스", "많이 본 뉴스"]
+    if title in bad or any(title.startswith(x) for x in ["관련뉴스", "뉴스홈", "구독", "랭킹"]):
+        return False
+    if title.count(".") > 8 or title.count("|") > 3:
+        return False
+    return True
+
+
 def strip_html(text: str) -> str:
     return compact(BeautifulSoup(text or "", "html.parser").get_text(" ", strip=True))
 
@@ -65,8 +85,8 @@ def split_title_source(title: str) -> tuple[str, str]:
     title = compact(title)
     if " - " in title:
         head, source = title.rsplit(" - ", 1)
-        return compact(head), compact(source)
-    return title, "출처 확인 필요"
+        return clean_title(head), compact(source)
+    return clean_title(title), "출처 확인 필요"
 
 
 def parse_pubdate(value: str) -> datetime | None:
@@ -116,7 +136,7 @@ def google_news(query: str) -> list[dict]:
     for item in root.findall("./channel/item")[:12]:
         title, source = split_title_source(item.findtext("title", ""))
         link = compact(item.findtext("link", ""))
-        if title:
+        if valid_title(title):
             rows.append({"title": title, "source": source, "snippet": strip_html(item.findtext("description", "")), "link": link, "published": parse_pubdate(item.findtext("pubDate", "")), "channel": "Google"})
     print(f"Google results for {query}: {len(rows)}")
     return rows
@@ -130,16 +150,16 @@ def naver_news(query: str) -> list[dict]:
         print("Naver News failed:", query, repr(exc))
         return []
     rows = []
-    for area in soup.select("div.news_area, div.sds-comps-vertical-layout")[:12]:
+    for area in soup.select("div.news_area")[:12]:
         try:
-            link = area.select_one("a.news_tit") or area.select_one('a[href*="http"]')
+            link = area.select_one("a.news_tit")
             if not link:
                 continue
-            title = compact(link.get("title") or link.get_text(" ", strip=True))
+            title = clean_title(link.get("title") or link.get_text(" ", strip=True))
             href = link.get("href", "")
             source_el = area.select_one("a.info.press") or area.select_one("span.info.press")
             source = compact(source_el.get_text(" ", strip=True)) if source_el else source_from_url(href)
-            if title and href:
+            if valid_title(title) and href:
                 text = compact(area.get_text(" ", strip=True))
                 rows.append({"title": title, "source": source, "snippet": text, "link": href, "published": parse_portal_date(text), "channel": "Naver"})
         except Exception as exc:
@@ -148,36 +168,50 @@ def naver_news(query: str) -> list[dict]:
     return rows
 
 
-def portal_news(query: str, channel: str, url: str) -> list[dict]:
+def daum_news(query: str) -> list[dict]:
+    url = "https://search.daum.net/search?w=news&sort=recency&q=" + quote_plus(query)
     try:
         soup = BeautifulSoup(fetch(url), "html.parser")
     except Exception as exc:
-        print(f"{channel} News failed:", query, repr(exc))
+        print("Daum News failed:", query, repr(exc))
         return []
     rows = []
-    for area in soup.select("div.item-bundle, div.c-item-content, div.news_wrap, li, div.wrap_cont, div.cont")[:30]:
+    selectors = "a.tit_main, a.tit-g, a.link_tit, strong.tit-g a, div.item-title a"
+    for link in soup.select(selectors)[:20]:
         try:
-            link = area.select_one('a[href*="http"]')
-            if not link:
-                continue
-            title = compact(link.get("title") or link.get_text(" ", strip=True))
+            title = clean_title(link.get("title") or link.get_text(" ", strip=True))
             href = link.get("href", "")
-            text = compact(area.get_text(" ", strip=True))
-            if len(title) < 6 or title == "뉴스":
-                continue
-            rows.append({"title": title, "source": source_from_url(href), "snippet": text, "link": href, "published": parse_portal_date(text), "channel": channel})
+            parent = link.find_parent(["li", "div", "article"]) or link
+            text = compact(parent.get_text(" ", strip=True))
+            if valid_title(title) and href:
+                rows.append({"title": title, "source": source_from_url(href), "snippet": text, "link": href, "published": parse_portal_date(text), "channel": "Daum"})
         except Exception as exc:
-            print(f"{channel} item skipped:", repr(exc))
-    print(f"{channel} results for {query}: {len(rows)}")
+            print("Daum item skipped:", repr(exc))
+    print(f"Daum results for {query}: {len(rows)}")
     return rows
 
 
-def daum_news(query: str) -> list[dict]:
-    return portal_news(query, "Daum", "https://search.daum.net/search?w=news&sort=recency&q=" + quote_plus(query))
-
-
 def zum_news(query: str) -> list[dict]:
-    return portal_news(query, "Zum", "https://search.zum.com/search.zum?method=news&option=date&query=" + quote_plus(query))
+    url = "https://search.zum.com/search.zum?method=news&option=date&query=" + quote_plus(query)
+    try:
+        soup = BeautifulSoup(fetch(url), "html.parser")
+    except Exception as exc:
+        print("Zum News failed:", query, repr(exc))
+        return []
+    rows = []
+    selectors = "a.title, a.tit, a.news_tit, div.news_wrap a[href*='http']"
+    for link in soup.select(selectors)[:20]:
+        try:
+            title = clean_title(link.get("title") or link.get_text(" ", strip=True))
+            href = link.get("href", "")
+            parent = link.find_parent(["li", "div", "article"]) or link
+            text = compact(parent.get_text(" ", strip=True))
+            if valid_title(title) and href:
+                rows.append({"title": title, "source": source_from_url(href), "snippet": text, "link": href, "published": parse_portal_date(text), "channel": "Zum"})
+        except Exception as exc:
+            print("Zum item skipped:", repr(exc))
+    print(f"Zum results for {query}: {len(rows)}")
+    return rows
 
 
 def is_target_date(article: dict) -> bool:
@@ -212,6 +246,8 @@ def collect_articles() -> tuple[list[dict], list[dict]]:
     candidates: list[dict] = []
     seen_links = set()
     for article in raw:
+        if not valid_title(article["title"]):
+            continue
         link_key = article.get("link") or normalize(article["title"])
         if link_key in seen_links:
             continue
@@ -256,10 +292,11 @@ def render_articles(articles: list[dict]) -> str:
     for article in articles:
         pub = article.get("published")
         time_text = pub.strftime("%H:%M") if pub else "시간 확인 필요"
+        title = shorten(article["title"], 82)
         cards.append(f"""
         <article class="news-card">
           <a href="{esc(article_url(article))}" target="_blank" rel="noopener noreferrer">
-            <h2>{esc(article['title'])}</h2>
+            <h2>{esc(title)}</h2>
             <p class="meta"><span>{esc(article['source'])}</span><span>{esc(time_text)}</span></p>
           </a>
         </article>
@@ -272,7 +309,7 @@ def render_excluded(excluded: list[dict]) -> str:
         return ""
     items = []
     for article in excluded[:6]:
-        items.append(f"<li>{esc(article['title'])} <span>{esc(article['source'])}</span></li>")
+        items.append(f"<li>{esc(shorten(article['title'], 80))} <span>{esc(article['source'])}</span></li>")
     return "<section class='excluded'><h2>보도자료·중복으로 제외</h2><ul>" + "".join(items) + "</ul></section>"
 
 
@@ -289,32 +326,32 @@ def write_page(articles: list[dict], excluded: list[dict]) -> None:
     :root {{ color-scheme: light; --ink:#171717; --muted:#6b7280; --line:#e5e7eb; --bg:#f7f8fa; --card:#ffffff; --accent:#126d5b; }}
     * {{ box-sizing:border-box; }}
     body {{ margin:0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background:var(--bg); color:var(--ink); }}
-    header {{ background:#0f172a; color:white; padding:28px 18px 24px; }}
-    .wrap {{ max-width:860px; margin:0 auto; }}
-    h1 {{ margin:0 0 8px; font-size:28px; letter-spacing:0; }}
+    header {{ background:#0f172a; color:white; padding:26px 18px 22px; }}
+    .wrap {{ max-width:780px; margin:0 auto; }}
+    h1 {{ margin:0 0 8px; font-size:26px; letter-spacing:0; }}
     .sub {{ margin:0; color:#cbd5e1; font-size:14px; }}
-    main {{ padding:18px; }}
-    .summary {{ display:flex; gap:8px; flex-wrap:wrap; margin:0 0 14px; }}
+    main {{ padding:16px; }}
+    .summary {{ display:flex; gap:8px; flex-wrap:wrap; margin:0 0 12px; }}
     .pill {{ background:#e6f4ef; color:#0b5d4d; border:1px solid #cbe7dd; border-radius:999px; padding:7px 10px; font-size:13px; font-weight:700; }}
-    .news-card {{ background:var(--card); border:1px solid var(--line); border-radius:10px; margin:10px 0; overflow:hidden; }}
-    .news-card a {{ display:block; color:inherit; text-decoration:none; padding:16px; }}
-    .news-card h2 {{ margin:0 0 10px; font-size:18px; line-height:1.35; letter-spacing:0; }}
+    .news-card {{ background:var(--card); border:1px solid var(--line); border-radius:8px; margin:8px 0; overflow:hidden; }}
+    .news-card a {{ display:block; color:inherit; text-decoration:none; padding:14px; }}
+    .news-card h2 {{ margin:0 0 8px; font-size:17px; line-height:1.35; letter-spacing:0; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }}
     .meta {{ display:flex; gap:8px; flex-wrap:wrap; margin:0; color:var(--muted); font-size:13px; }}
     .meta span {{ border-right:1px solid var(--line); padding-right:8px; }}
     .meta span:last-child {{ border-right:0; }}
-    .excluded {{ margin-top:24px; padding:16px; border:1px solid var(--line); border-radius:10px; background:white; }}
-    .excluded h2 {{ margin:0 0 10px; font-size:16px; }}
+    .excluded {{ margin-top:20px; padding:14px; border:1px solid var(--line); border-radius:8px; background:white; }}
+    .excluded h2 {{ margin:0 0 10px; font-size:15px; }}
     .excluded ul {{ margin:0; padding-left:20px; color:#4b5563; }}
-    .excluded li {{ margin:8px 0; }}
+    .excluded li {{ margin:7px 0; }}
     .excluded span {{ color:#8a94a3; font-size:12px; }}
-    .empty {{ padding:18px; background:white; border:1px solid var(--line); border-radius:10px; }}
+    .empty {{ padding:18px; background:white; border:1px solid var(--line); border-radius:8px; }}
     footer {{ color:#8a94a3; font-size:12px; padding:10px 0 28px; }}
   </style>
 </head>
 <body>
   <header><div class="wrap"><h1>용인·모현 오늘 뉴스</h1><p class="sub">{esc(today())} · 생성 {esc(generated_at)}</p></div></header>
   <main><div class="wrap">
-    <div class="summary"><span class="pill">자체 기사 {len(articles)}건</span><span class="pill">제외 {len(excluded)}건</span></div>
+    <div class="summary"><span class="pill">기사 {len(articles)}건</span><span class="pill">제외 {len(excluded)}건</span></div>
     {render_articles(articles)}
     {render_excluded(excluded)}
     <footer>검색원: Google News, Naver, Daum, Zum</footer>
