@@ -1,0 +1,27 @@
+name: Apptech Kakao Test Once
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apptech-test-once.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  send-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
+      - run: pip install -r requirements.txt
+      - run: python -m playwright install --with-deps chromium
+      - name: Send test apptech alert
+        env:
+          KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
+          KAKAO_REFRESH_TOKEN: ${{ secrets.KAKAO_REFRESH_TOKEN }}
+          PLAYWRIGHT_HEADED: "1"
+        run: xvfb-run -a python apptech_alert.py --mode noon
