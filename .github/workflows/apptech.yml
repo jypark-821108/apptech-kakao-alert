@@ -2,9 +2,9 @@ name: Apptech Kakao Alert
 
 on:
   schedule:
-    # Korea time 12:00
-    - cron: '0 3 * * *'
-    # Korea time 18:00
+    # Korea time 10:20, after the usual late KB Pay post around 10:00
+    - cron: '20 1 * * *'
+    # Korea time 18:00, retry only when answers were missing
     - cron: '0 9 * * *'
   workflow_dispatch:
     inputs:
