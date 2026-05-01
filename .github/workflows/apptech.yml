@@ -1,0 +1,57 @@
+name: Apptech Kakao Alert
+
+on:
+  schedule:
+    # Korea time 12:00
+    - cron: '0 3 * * *'
+    # Korea time 18:00
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Run mode: noon or retry'
+        required: true
+        default: 'noon'
+        type: choice
+        options:
+          - noon
+          - retry
+
+permissions:
+  contents: write
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Decide mode
+        id: mode
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "mode=${{ inputs.mode }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "0 9 * * *" ]; then
+            echo "mode=retry" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=noon" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Send apptech alert
+        env:
+          KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
+          KAKAO_REFRESH_TOKEN: ${{ secrets.KAKAO_REFRESH_TOKEN }}
+        run: python apptech_alert.py --mode "${{ steps.mode.outputs.mode }}"
+      - name: Commit status file
+        if: always()
+        run: |
+          if [ -f apptech-quiz-status.json ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add apptech-quiz-status.json
+            git diff --cached --quiet || git commit -m "Update apptech quiz status"
+            git push
+          fi
