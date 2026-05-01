@@ -301,14 +301,14 @@ def build_message(articles: list[dict], excluded: list[dict]) -> str:
             lines.append(f"- {article['title']} ({article['source']} / {time_text} / {article['channel']})")
         lines.append("")
 
-    lines.append(f"검색원: Google·Naver·Daum·Zum")
+    lines.append("검색원: Google·Naver·Daum·Zum")
     lines.append(f"제외한 보도자료·중복성 기사: {len(excluded)}건")
     return "\n".join(lines).strip()
 
 
 def main() -> None:
     articles, excluded = collect_articles()
-    send_kakao(build_message(articles, excluded), link="https://search.naver.com/search.naver?where=news&query=%EC%9A%A9%EC%9D%B8%EC%8B%9C")
+    send_kakao(build_message(articles, excluded))
 
 
 if __name__ == "__main__":
