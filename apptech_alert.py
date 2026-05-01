@@ -24,13 +24,13 @@ ITEMS = [
 ]
 
 QUERY_MAP = {
-    "신한퀴즈": ["신한퀴즈", "신한 쏠퀴즈", "신한플레이 퀴즈", "신한 슈퍼SOL 출석퀴즈"],
-    "모니모 영어 퀴즈": ["모니모 영어 퀴즈", "모니모 오늘의 영어", "모니모 영어공부"],
+    "신한퀴즈": ["신한퀴즈", "신한 쏠퀴즈", "신한플레이 퀴즈"],
+    "모니모 영어 퀴즈": ["모니모 영어 퀴즈", "모니모 오늘의 영어"],
     "KB Pay 퀴즈": ["KB Pay 퀴즈", "KB Pay 오늘의 퀴즈", "KB페이 오늘의퀴즈"],
     "KB 스타퀴즈": ["KB 스타퀴즈", "KB스타뱅킹 스타퀴즈"],
     "올원뱅크 디깅퀴즈": ["올원뱅크 디깅퀴즈", "NH올원뱅크 디깅퀴즈"],
-    "하나원큐 축구Play 퀴즈": ["하나원큐 축구Play 퀴즈", "하나원큐 축구플레이 퀴즈", "하나원큐 축구 Play"],
-    "하나원큐 OX퀴즈": ["하나원큐 OX퀴즈", "하나원큐 OX 퀴즈", "하나원큐 슬기로운 금융생활 OX"],
+    "하나원큐 축구Play 퀴즈": ["하나원큐 축구Play 퀴즈", "하나원큐 축구플레이 퀴즈"],
+    "하나원큐 OX퀴즈": ["하나원큐 OX퀴즈", "하나원큐 OX 퀴즈"],
 }
 
 HEADERS = {
@@ -58,10 +58,26 @@ def compact(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip(" -:：[]()'\".,")
 
 
-def request_text(url: str, **kwargs) -> str:
-    res = requests.get(url, headers=HEADERS, timeout=20, **kwargs)
+def request_text(url: str) -> str:
+    res = requests.get(url, headers=HEADERS, timeout=8)
     res.raise_for_status()
     return res.text
+
+
+def search_naver_web(query: str) -> list[str]:
+    url = "https://search.naver.com/search.naver?where=webkr&query=" + quote_plus(query)
+    try:
+        html = request_text(url)
+    except Exception:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    texts = []
+    for selector in [".total_wrap", ".api_subject_bx", ".fds-collection-root"]:
+        for result in soup.select(selector)[:4]:
+            text = result.get_text(" ", strip=True)
+            if text:
+                texts.append(text)
+    return texts
 
 
 def search_duckduckgo(query: str) -> list[str]:
@@ -72,7 +88,7 @@ def search_duckduckgo(query: str) -> list[str]:
         return []
     soup = BeautifulSoup(html, "html.parser")
     texts = []
-    for result in soup.select(".result")[:10]:
+    for result in soup.select(".result")[:4]:
         title = result.select_one(".result__title")
         snippet = result.select_one(".result__snippet")
         text = " ".join(x.get_text(" ", strip=True) for x in [title, snippet] if x)
@@ -81,54 +97,24 @@ def search_duckduckgo(query: str) -> list[str]:
     return texts
 
 
-def search_naver_web(query: str) -> list[str]:
-    # Public search-result HTML only; no login or API key.
-    url = "https://search.naver.com/search.naver?where=webkr&query=" + quote_plus(query)
+def fetch_fmkorea_texts(keyword: str) -> list[str]:
+    url = f"https://www.fmkorea.com/search.php?mid=freedeal&search_keyword={quote_plus(keyword)}&search_target=title_content"
     try:
         html = request_text(url)
     except Exception:
         return []
-    soup = BeautifulSoup(html, "html.parser")
-    texts = []
-    selectors = [".total_wrap", ".api_subject_bx", ".fds-collection-root"]
-    for selector in selectors:
-        for result in soup.select(selector)[:8]:
-            text = result.get_text(" ", strip=True)
-            if text:
-                texts.append(text)
-    return texts
-
-
-def fetch_fmkorea_texts(keyword: str) -> list[str]:
-    urls = [
-        f"https://www.fmkorea.com/search.php?mid=freedeal&search_keyword={quote_plus(keyword)}&search_target=title_content",
-        f"https://www.fmkorea.com/index.php?mid=freedeal&act=IS&is_keyword={quote_plus(keyword)}",
-    ]
-    texts = []
-    for url in urls:
-        try:
-            html = request_text(url)
-        except Exception:
-            continue
-        soup = BeautifulSoup(html, "html.parser")
-        text = soup.get_text(" ", strip=True)
-        if text:
-            texts.append(text[:5000])
-    return texts
+    text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
+    return [text[:4000]] if text else []
 
 
 def candidate_queries(item: str) -> list[str]:
-    base = QUERY_MAP[item]
-    dates = [today(), today_kr(), f"{now_kst().month}월 {now_kst().day}일"]
-    queries = []
-    for keyword in base:
-        for date in dates:
-            queries.extend([
-                f"{date} {keyword} 정답",
-                f"{keyword} {date} 정답",
-                f"{keyword} 정답",
-            ])
-    return list(dict.fromkeys(queries))
+    keyword = QUERY_MAP[item][0]
+    return [
+        f"{today()} {keyword} 정답",
+        f"{today_kr()} {keyword} 정답",
+        f"{now_kst().month}월 {now_kst().day}일 {keyword} 정답",
+        f"{keyword} 정답",
+    ]
 
 
 def clean_candidate(raw: str) -> str | None:
@@ -159,7 +145,6 @@ def extract_answer(item: str, texts: list[str]) -> str | None:
                 candidates.append(value)
     if not candidates:
         return None
-    # Prefer the shortest plausible value; snippets often append unrelated text after the answer.
     candidates.sort(key=lambda x: (len(x), x))
     return candidates[0]
 
@@ -168,13 +153,16 @@ def collect_answers() -> dict[str, str]:
     answers = {}
     for item in ITEMS:
         all_texts = []
-        for query in candidate_queries(item)[:12]:
+        for query in candidate_queries(item):
             all_texts.extend(search_naver_web(query))
-            all_texts.extend(search_duckduckgo(query))
-        for keyword in QUERY_MAP[item][:2]:
-            all_texts.extend(fetch_fmkorea_texts(keyword))
-        answer = extract_answer(item, all_texts)
-        answers[item] = answer or UNKNOWN
+            if all_texts and extract_answer(item, all_texts):
+                break
+        if not extract_answer(item, all_texts):
+            for query in candidate_queries(item)[:2]:
+                all_texts.extend(search_duckduckgo(query))
+        if not extract_answer(item, all_texts):
+            all_texts.extend(fetch_fmkorea_texts(QUERY_MAP[item][0]))
+        answers[item] = extract_answer(item, all_texts) or UNKNOWN
     return answers
 
 
