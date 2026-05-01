@@ -45,7 +45,8 @@ jobs:
         env:
           KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
           KAKAO_REFRESH_TOKEN: ${{ secrets.KAKAO_REFRESH_TOKEN }}
-        run: python apptech_alert.py --mode "${{ steps.mode.outputs.mode }}"
+          PLAYWRIGHT_HEADED: "1"
+        run: xvfb-run -a python apptech_alert.py --mode "${{ steps.mode.outputs.mode }}"
       - name: Commit status file
         if: always()
         run: |
