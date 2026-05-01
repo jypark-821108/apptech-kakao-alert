@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   send:
@@ -18,8 +18,19 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - name: Send local newsletter
+      - name: Build and send local newsletter
         env:
           KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
           KAKAO_REFRESH_TOKEN: ${{ secrets.KAKAO_REFRESH_TOKEN }}
+          NEWSLETTER_URL: https://jypark-821108.github.io/apptech-kakao-alert/newsletter.html
         run: python local_newsletter.py
+      - name: Commit newsletter page
+        if: always()
+        run: |
+          if [ -f docs/newsletter.html ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add docs/newsletter.html
+            git diff --cached --quiet || git commit -m "Update local newsletter page"
+            git push
+          fi
