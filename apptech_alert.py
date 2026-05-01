@@ -43,12 +43,12 @@ FM_KEYS = {
 
 PP_KEYS = {
     "신한퀴즈": [["신한쏠"], ["신한플레이"], ["신한슈퍼SOL"], ["신한", "정답"]],
-    "모니모 영어 퀴즈": [["모니모", "영어"]],
+    "모니모 영어 퀴즈": [["모니모", "영어"], ["모니모"]],
     "KB Pay 퀴즈": [["KB Pay", "오늘의 퀴즈"], ["KB Pay"]],
     "KB 스타퀴즈": [["KB스타뱅킹", "스타퀴즈"], ["KB", "스타퀴즈"]],
     "올원뱅크 디깅퀴즈": [["올원뱅크", "디깅퀴즈"], ["NH올원뱅크", "디깅퀴즈"]],
-    "하나원큐 축구Play 퀴즈": [["하나원큐", "축구"]],
-    "하나원큐 OX퀴즈": [["하나원큐", "OX퀴즈"]],
+    "하나원큐 축구Play 퀴즈": [["하나원큐", "축구"], ["축구", "Play"]],
+    "하나원큐 OX퀴즈": [["하나원큐", "OX퀴즈"], ["하나원큐", "OX"]],
 }
 
 HEADERS = {
@@ -65,6 +65,17 @@ def today() -> str:
     return now().strftime("%Y-%m-%d")
 
 
+def date_markers() -> list[str]:
+    d = now()
+    return [
+        d.strftime("%Y-%m-%d"),
+        f"{d.month}/{d.day}",
+        f"{d.month}/{d.day}일",
+        f"{d.month}월 {d.day}일",
+        f"{d.month}월{d.day}일",
+    ]
+
+
 def compact(text: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(text or "")).strip(" -:：[]()'\".,")
 
@@ -78,13 +89,18 @@ def title_match(title: str, groups: list[list[str]]) -> bool:
     return any(all(norm(k) in n for k in group) for group in groups)
 
 
+def is_today_title(title: str) -> bool:
+    n = norm(title)
+    return any(norm(marker) in n for marker in date_markers())
+
+
 def clean_answer(raw: str) -> str | None:
     value = compact(raw)
     value = re.split(r"(?:입니다|입니당|참고|출처|댓글|추천|조회|스크랩|정답 입력 전|모든 분들|즐거운|감사|\||<)", value)[0]
     value = compact(value)
-    if not value or len(value) > 50:
+    if not value or len(value) > 80:
         return None
-    bad_words = ["확인", "퀴즈", "정답", "게시판", "링크", "댓글", "본문", "쿠폰", "참여"]
+    bad_words = ["확인", "퀴즈", "정답", "게시판", "링크", "댓글", "본문", "쿠폰", "참여", "이미지"]
     if any(bad in value for bad in bad_words):
         return None
     return value
@@ -105,7 +121,7 @@ def extract_answer(text: str) -> str | None:
                 if ans:
                     return ans
     one = compact(text)
-    for pattern in [r"정답\s*[:：은는]?\s*([^。.!?]{1,60})", r"정답은\s*([^。.!?]{1,60})"]:
+    for pattern in [r"정답\s*[:：은는]?\s*([^。!?]{1,80})", r"정답은\s*([^。!?]{1,80})"]:
         m = re.search(pattern, one, flags=re.I)
         if m:
             ans = clean_answer(m.group(1))
@@ -232,14 +248,17 @@ def req(url: str) -> str:
 def parse_ppomppu_links(html_text: str) -> list[tuple[str, str]]:
     soup = BeautifulSoup(html_text, "html.parser")
     posts: list[tuple[str, str]] = []
-    for link in soup.select('a[href*="view.php?id=coupon&no="]'):
+    for link in soup.find_all("a", href=True):
         href = link.get("href", "")
-        m = re.search(r"no=(\d+)", href)
+        if "view.php?id=coupon" not in href or "no=" not in href:
+            continue
+        m = re.search(r"(?:\?|&)no=(\d+)", href)
         title = compact(link.get_text(" ", strip=True))
-        if m and title and len(title) > 2:
-            pair = (m.group(1), title)
-            if pair not in posts:
-                posts.append(pair)
+        if not m or not title or len(title) <= 2:
+            continue
+        pair = (m.group(1), title)
+        if pair not in posts:
+            posts.append(pair)
     return posts
 
 
@@ -249,16 +268,20 @@ def ppomppu_candidates(item: str) -> list[tuple[str, str]]:
     urls = [PP_BOARD] + [PP_SEARCH.format(quote_plus(k)) for k in keywords]
     for url in urls:
         try:
-            posts.extend(parse_ppomppu_links(req(url)))
+            found = parse_ppomppu_links(req(url))
+            print(f"Ppomppu links from {url}: {len(found)}")
+            posts.extend(found)
         except Exception as exc:
             print("Ppomppu fetch failed:", url, repr(exc))
     dedup: list[tuple[str, str]] = []
     for pair in posts:
         if pair not in dedup:
             dedup.append(pair)
-    filtered = [(pid, title) for pid, title in dedup if title_match(title, PP_KEYS[item]) and "정답" in title]
+    matched = [(pid, title) for pid, title in dedup if title_match(title, PP_KEYS[item]) and "정답" in title]
+    today_matches = [(pid, title) for pid, title in matched if is_today_title(title)]
+    filtered = today_matches or matched
     print(f"Ppomppu candidates for {item}:", filtered[:10])
-    return filtered[:6]
+    return filtered[:8]
 
 
 def ppomppu_answer(pid: str) -> str | None:
@@ -285,11 +308,16 @@ def collect_ppomppu(existing: dict[str, str]) -> dict[str, str]:
         candidates = ppomppu_candidates(item)
         if item == "신한퀴즈":
             parts = []
+            seen_labels = set()
             for pid, title in candidates:
                 ans = ppomppu_answer(pid)
-                if ans:
-                    label = "쏠" if "쏠" in title else "팡팡" if "팡팡" in title else "출석" if "출석" in title or "슈퍼SOL" in title else "신한"
-                    parts.append(f"{label} {ans}")
+                if not ans:
+                    continue
+                label = "쏠" if "쏠" in title else "팡팡" if "팡팡" in title else "출석" if "출석" in title or "슈퍼SOL" in title else "신한"
+                if label in seen_labels:
+                    continue
+                seen_labels.add(label)
+                parts.append(f"{label} {ans}")
             if parts:
                 answers[item] = " / ".join(parts)
             continue
