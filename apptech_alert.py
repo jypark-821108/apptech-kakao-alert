@@ -4,6 +4,7 @@ import json
 import os
 import re
 from datetime import datetime, timezone, timedelta
+from urllib.parse import quote_plus
 
 import requests
 from bs4 import BeautifulSoup
@@ -12,12 +13,13 @@ from playwright.sync_api import sync_playwright
 from kakao import send_kakao
 
 KST = timezone(timedelta(hours=9))
-STATUS_FILE = "apptech-quiz-status.json"
 UNKNOWN = "아직 확인 안 됨"
+STATUS_FILE = "apptech-quiz-status.json"
 FM_BOARD = "https://www.fmkorea.com/freedeal"
 FM_POST = "https://www.fmkorea.com/{}"
-PPOMPPU_BOARD = "https://www.ppomppu.co.kr/zboard/zboard.php?id=coupon"
-PPOMPPU_POST = "https://www.ppomppu.co.kr/zboard/view.php?id=coupon&no={}"
+PP_BOARD = "https://www.ppomppu.co.kr/zboard/zboard.php?id=coupon"
+PP_SEARCH = "https://www.ppomppu.co.kr/zboard/zboard.php?id=coupon&search_type=sub_memo&keyword={}"
+PP_POST = "https://www.ppomppu.co.kr/zboard/view.php?id=coupon&no={}"
 
 ITEMS = [
     "신한퀴즈",
@@ -29,24 +31,24 @@ ITEMS = [
     "하나원큐 OX퀴즈",
 ]
 
-FM_TITLE_KEYWORDS = {
-    "신한퀴즈": ["신한퀴즈"],
-    "모니모 영어 퀴즈": ["모니모", "영어", "퀴즈"],
-    "KB Pay 퀴즈": ["KB Pay", "퀴즈"],
-    "KB 스타퀴즈": ["kb", "스타퀴즈"],
-    "올원뱅크 디깅퀴즈": ["올원뱅크", "디깅퀴즈"],
-    "하나원큐 축구Play 퀴즈": ["하나원큐", "축구"],
-    "하나원큐 OX퀴즈": ["하나원큐", "OX퀴즈"],
+FM_KEYS = {
+    "신한퀴즈": [["신한퀴즈"]],
+    "모니모 영어 퀴즈": [["모니모", "영어", "퀴즈"]],
+    "KB Pay 퀴즈": [["KB Pay", "퀴즈"]],
+    "KB 스타퀴즈": [["kb", "스타퀴즈"]],
+    "올원뱅크 디깅퀴즈": [["올원뱅크", "디깅퀴즈"]],
+    "하나원큐 축구Play 퀴즈": [["하나원큐", "축구"]],
+    "하나원큐 OX퀴즈": [["하나원큐", "OX퀴즈"]],
 }
 
-PPOMPPU_TITLE_KEYWORDS = {
-    "신한퀴즈": ["신한"],
-    "모니모 영어 퀴즈": ["모니모", "영어"],
-    "KB Pay 퀴즈": ["KB Pay", "오늘의 퀴즈"],
-    "KB 스타퀴즈": ["KB스타뱅킹", "스타퀴즈"],
-    "올원뱅크 디깅퀴즈": ["올원뱅크", "디깅퀴즈"],
-    "하나원큐 축구Play 퀴즈": ["하나원큐", "축구"],
-    "하나원큐 OX퀴즈": ["하나원큐", "OX퀴즈"],
+PP_KEYS = {
+    "신한퀴즈": [["신한쏠"], ["신한플레이"], ["신한슈퍼SOL"], ["신한", "정답"]],
+    "모니모 영어 퀴즈": [["모니모", "영어"]],
+    "KB Pay 퀴즈": [["KB Pay", "오늘의 퀴즈"], ["KB Pay"]],
+    "KB 스타퀴즈": [["KB스타뱅킹", "스타퀴즈"], ["KB", "스타퀴즈"]],
+    "올원뱅크 디깅퀴즈": [["올원뱅크", "디깅퀴즈"], ["NH올원뱅크", "디깅퀴즈"]],
+    "하나원큐 축구Play 퀴즈": [["하나원큐", "축구"]],
+    "하나원큐 OX퀴즈": [["하나원큐", "OX퀴즈"]],
 }
 
 HEADERS = {
@@ -55,25 +57,25 @@ HEADERS = {
 }
 
 
-def now_kst() -> datetime:
+def now() -> datetime:
     return datetime.now(KST)
 
 
 def today() -> str:
-    return now_kst().strftime("%Y-%m-%d")
+    return now().strftime("%Y-%m-%d")
 
 
-def compact(value: str) -> str:
-    return re.sub(r"\s+", " ", html.unescape(value)).strip(" -:：[]()'\".,")
+def compact(text: str) -> str:
+    return re.sub(r"\s+", " ", html.unescape(text or "")).strip(" -:：[]()'\".,")
 
 
-def normalized(value: str) -> str:
-    return compact(value).lower().replace(" ", "")
+def norm(text: str) -> str:
+    return compact(text).lower().replace(" ", "")
 
 
-def title_matches(item: str, title: str, keyword_map: dict[str, list[str]]) -> bool:
-    title_norm = normalized(title)
-    return all(normalized(k) in title_norm for k in keyword_map[item])
+def title_match(title: str, groups: list[list[str]]) -> bool:
+    n = norm(title)
+    return any(all(norm(k) in n for k in group) for group in groups)
 
 
 def clean_answer(raw: str) -> str | None:
@@ -82,233 +84,254 @@ def clean_answer(raw: str) -> str | None:
     value = compact(value)
     if not value or len(value) > 50:
         return None
-    if any(bad in value for bad in ["확인", "퀴즈", "정답", "게시판", "링크", "댓글", "본문", "쿠폰"]):
+    bad_words = ["확인", "퀴즈", "정답", "게시판", "링크", "댓글", "본문", "쿠폰", "참여"]
+    if any(bad in value for bad in bad_words):
         return None
     return value
 
 
-def extract_answer_from_text(text: str) -> str | None:
-    lines = [compact(line) for line in re.split(r"[\r\n]+", text) if compact(line)]
+def extract_answer(text: str) -> str | None:
+    lines = [compact(x) for x in re.split(r"[\r\n]+", text or "") if compact(x)]
+    patterns = [
+        r"정답\s*[:：은는]?\s*(.+)$",
+        r"정답은\s*(.+)$",
+        r"답\s*[:：은는]?\s*(.+)$",
+    ]
     for line in lines:
-        for pattern in [r"정답\s*[:：은는]?\s*(.+)$", r"답\s*[:：은는]?\s*(.+)$"]:
-            match = re.search(pattern, line, flags=re.IGNORECASE)
-            if match:
-                answer = clean_answer(match.group(1))
-                if answer:
-                    return answer
-    text_one_line = compact(text)
-    for pattern in [r"정답\s*[:：은는]?\s*([^。.!?]{1,60})", r"정답은\s*([^。.!?]{1,60})", r"답\s*[:：은는]?\s*([^。.!?]{1,60})"]:
-        match = re.search(pattern, text_one_line, flags=re.IGNORECASE)
-        if match:
-            answer = clean_answer(match.group(1))
-            if answer:
-                return answer
+        for pattern in patterns:
+            m = re.search(pattern, line, flags=re.I)
+            if m:
+                ans = clean_answer(m.group(1))
+                if ans:
+                    return ans
+    one = compact(text)
+    for pattern in [r"정답\s*[:：은는]?\s*([^。.!?]{1,60})", r"정답은\s*([^。.!?]{1,60})"]:
+        m = re.search(pattern, one, flags=re.I)
+        if m:
+            ans = clean_answer(m.group(1))
+            if ans:
+                return ans
     return None
 
 
-def parse_fm_posts(html_text: str) -> list[tuple[str, str]]:
-    soup = BeautifulSoup(html_text, "html.parser")
+def parse_fm_posts(page_html: str) -> list[tuple[str, str]]:
+    soup = BeautifulSoup(page_html, "html.parser")
     posts: list[tuple[str, str]] = []
     for row in soup.select("table.bd_lst tbody tr"):
-        title_cell = row.select_one("td.title")
-        if not title_cell:
+        cell = row.select_one("td.title")
+        if not cell:
             continue
-        link = title_cell.select_one('a[href^="/"]')
+        link = cell.select_one('a[href^="/"]')
         if not link:
             continue
         href = link.get("href", "")
-        match = re.search(r"/(\d+)$", href.split("?")[0])
+        m = re.search(r"/(\d+)$", href.split("?")[0])
         title = compact(link.get_text(" ", strip=True))
-        if match and title:
-            posts.append((match.group(1), title))
+        if m and title:
+            posts.append((m.group(1), title))
     return posts
 
 
-def wait_past_security(page) -> None:
-    for _ in range(4):
-        text = page.locator("body").inner_text(timeout=10000)
-        if "에펨코리아 보안 시스템" not in text:
-            return
-        page.wait_for_timeout(4000)
+def wait_fm(page) -> str:
+    last = ""
+    for i in range(8):
+        page.wait_for_timeout(3000)
         try:
-            page.reload(wait_until="domcontentloaded", timeout=30000)
+            text = page.locator("body").inner_text(timeout=10000)
         except Exception:
-            pass
+            text = ""
+        last = text
+        if "에펨코리아 보안 시스템" not in text and "사람인지 확인" not in text:
+            return text
+        print(f"FMKorea security page still visible, wait round {i + 1}")
+    return last
 
 
-def collect_from_fmkorea() -> dict[str, str]:
+def collect_fmkorea() -> dict[str, str]:
     answers = {item: UNKNOWN for item in ITEMS}
+    headed = os.environ.get("PLAYWRIGHT_HEADED") == "1"
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(
+            headless=not headed,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+            ],
+        )
         context = browser.new_context(
             locale="ko-KR",
+            timezone_id="Asia/Seoul",
             user_agent=HEADERS["User-Agent"],
+            viewport={"width": 1365, "height": 900},
             extra_http_headers={"Accept-Language": HEADERS["Accept-Language"]},
         )
+        context.add_init_script("""
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+Object.defineProperty(navigator, 'languages', {get: () => ['ko-KR', 'ko', 'en-US', 'en']});
+Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+window.chrome = window.chrome || { runtime: {} };
+""")
         page = context.new_page()
         try:
-            page.goto(FM_BOARD, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(3500)
-            wait_past_security(page)
-            board_text = page.locator("body").inner_text(timeout=10000)
-            if "에펨코리아 보안 시스템" in board_text:
-                print("FMKorea board is still blocked by security page.")
-                browser.close()
+            page.goto(FM_BOARD, wait_until="domcontentloaded", timeout=45000)
+            board_text = wait_fm(page)
+            if "에펨코리아 보안 시스템" in board_text or "사람인지 확인" in board_text:
+                print("FMKorea board remained blocked. body snippet:", compact(board_text[:500]))
                 return answers
             posts = parse_fm_posts(page.content())
-            print("FMKorea matched board posts:", [(pid, title) for pid, title in posts if any(title_matches(item, title, FM_TITLE_KEYWORDS) for item in ITEMS)][:20])
+            matched = [(pid, title) for pid, title in posts if any(title_match(title, FM_KEYS[item]) for item in ITEMS)]
+            print("FMKorea matched posts:", matched[:30])
             for item in ITEMS:
-                matches = [(pid, title) for pid, title in posts if title_matches(item, title, FM_TITLE_KEYWORDS)][:4]
+                matches = [(pid, title) for pid, title in posts if title_match(title, FM_KEYS[item])][:4]
                 if item == "신한퀴즈":
                     parts = []
-                    for post_id, title in matches:
-                        answer = fetch_fm_answer(page, post_id)
-                        if answer:
+                    for pid, title in matches:
+                        ans = fm_post_answer(page, pid)
+                        if ans:
                             label = "쏠" if "쏠" in title else "팡팡" if "팡팡" in title else "출석" if "출석" in title else "신한"
-                            parts.append(f"{label} {answer}")
+                            parts.append(f"{label} {ans}")
                     if parts:
                         answers[item] = " / ".join(parts)
                     continue
-                for post_id, _title in matches:
-                    answer = fetch_fm_answer(page, post_id)
-                    if answer:
-                        answers[item] = answer
+                for pid, _ in matches:
+                    ans = fm_post_answer(page, pid)
+                    if ans:
+                        answers[item] = ans
                         break
         except Exception as exc:
-            print(f"FMKorea fetch failed: {exc}")
+            print("FMKorea collection failed:", repr(exc))
         finally:
             browser.close()
     return answers
 
 
-def fetch_fm_answer(page, post_id: str) -> str | None:
+def fm_post_answer(page, pid: str) -> str | None:
     try:
-        page.goto(FM_POST.format(post_id), wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(3500)
-        wait_past_security(page)
-        text = page.locator("body").inner_text(timeout=10000)
-        if "에펨코리아 보안 시스템" in text:
+        page.goto(FM_POST.format(pid), wait_until="domcontentloaded", timeout=45000)
+        text = wait_fm(page)
+        if "에펨코리아 보안 시스템" in text or "사람인지 확인" in text:
+            print(f"FMKorea post {pid} blocked")
             return None
-        return extract_answer_from_text(text)
+        ans = extract_answer(text)
+        print(f"FMKorea post {pid} answer: {ans}")
+        return ans
     except Exception as exc:
-        print(f"FMKorea post fetch failed {post_id}: {exc}")
+        print(f"FMKorea post {pid} failed: {exc!r}")
         return None
 
 
-def request_text(url: str) -> str:
-    res = requests.get(url, headers=HEADERS, timeout=15)
-    res.raise_for_status()
-    if not res.encoding or res.encoding.lower() in {"iso-8859-1", "ascii"}:
-        res.encoding = res.apparent_encoding
-    return res.text
+def req(url: str) -> str:
+    r = requests.get(url, headers=HEADERS, timeout=20)
+    r.raise_for_status()
+    if not r.encoding or r.encoding.lower() in {"iso-8859-1", "ascii"}:
+        r.encoding = r.apparent_encoding
+    return r.text
 
 
-def ppomppu_posts() -> list[tuple[str, str]]:
-    try:
-        soup = BeautifulSoup(request_text(PPOMPPU_BOARD), "html.parser")
-    except Exception as exc:
-        print(f"Ppomppu board fetch failed: {exc}")
-        return []
+def parse_ppomppu_links(html_text: str) -> list[tuple[str, str]]:
+    soup = BeautifulSoup(html_text, "html.parser")
     posts: list[tuple[str, str]] = []
     for link in soup.select('a[href*="view.php?id=coupon&no="]'):
         href = link.get("href", "")
-        match = re.search(r"no=(\d+)", href)
+        m = re.search(r"no=(\d+)", href)
         title = compact(link.get_text(" ", strip=True))
-        if match and title:
-            pair = (match.group(1), title)
+        if m and title and len(title) > 2:
+            pair = (m.group(1), title)
             if pair not in posts:
                 posts.append(pair)
-    return posts[:100]
+    return posts
 
 
-def ppomppu_post_text(no: str) -> tuple[str, str]:
-    soup = BeautifulSoup(request_text(PPOMPPU_POST.format(no)), "html.parser")
-    desc = ""
-    desc_meta = soup.select_one('meta[name="description"]') or soup.select_one('meta[property="og:description"]')
-    if desc_meta:
-        desc = desc_meta.get("content", "")
-    body = soup.get_text("\n", strip=True)
-    return desc, body
+def ppomppu_candidates(item: str) -> list[tuple[str, str]]:
+    posts: list[tuple[str, str]] = []
+    keywords = [" ".join(group) for group in PP_KEYS[item]]
+    urls = [PP_BOARD] + [PP_SEARCH.format(quote_plus(k)) for k in keywords]
+    for url in urls:
+        try:
+            posts.extend(parse_ppomppu_links(req(url)))
+        except Exception as exc:
+            print("Ppomppu fetch failed:", url, repr(exc))
+    dedup: list[tuple[str, str]] = []
+    for pair in posts:
+        if pair not in dedup:
+            dedup.append(pair)
+    filtered = [(pid, title) for pid, title in dedup if title_match(title, PP_KEYS[item]) and "정답" in title]
+    print(f"Ppomppu candidates for {item}:", filtered[:10])
+    return filtered[:6]
 
 
-def collect_from_ppomppu(existing: dict[str, str]) -> dict[str, str]:
+def ppomppu_answer(pid: str) -> str | None:
+    try:
+        soup = BeautifulSoup(req(PP_POST.format(pid)), "html.parser")
+        desc = ""
+        meta = soup.select_one('meta[name="description"]') or soup.select_one('meta[property="og:description"]')
+        if meta:
+            desc = meta.get("content", "")
+        text = soup.get_text("\n", strip=True)
+        ans = extract_answer(desc + "\n" + text)
+        print(f"Ppomppu post {pid} answer: {ans}")
+        return ans
+    except Exception as exc:
+        print(f"Ppomppu post {pid} failed: {exc!r}")
+        return None
+
+
+def collect_ppomppu(existing: dict[str, str]) -> dict[str, str]:
     answers = dict(existing)
-    posts = ppomppu_posts()
-    print("Ppomppu fallback candidates:", posts[:20])
     for item in ITEMS:
         if answers[item] != UNKNOWN:
             continue
-        matches = [(pid, title) for pid, title in posts if title_matches(item, title, PPOMPPU_TITLE_KEYWORDS) and "정답" in title][:5]
+        candidates = ppomppu_candidates(item)
         if item == "신한퀴즈":
             parts = []
-            for post_id, title in matches:
-                desc, body = ppomppu_post_text(post_id)
-                answer = extract_answer_from_text("\n".join([desc, body]))
-                if answer:
+            for pid, title in candidates:
+                ans = ppomppu_answer(pid)
+                if ans:
                     label = "쏠" if "쏠" in title else "팡팡" if "팡팡" in title else "출석" if "출석" in title or "슈퍼SOL" in title else "신한"
-                    parts.append(f"{label} {answer}")
+                    parts.append(f"{label} {ans}")
             if parts:
                 answers[item] = " / ".join(parts)
             continue
-        for post_id, _title in matches:
-            desc, body = ppomppu_post_text(post_id)
-            answer = extract_answer_from_text("\n".join([desc, body]))
-            if answer:
-                answers[item] = answer
+        for pid, _ in candidates:
+            ans = ppomppu_answer(pid)
+            if ans:
+                answers[item] = ans
                 break
     return answers
 
 
 def collect_answers() -> dict[str, str]:
-    answers = collect_from_fmkorea()
-    if any(answer == UNKNOWN for answer in answers.values()):
-        answers = collect_from_ppomppu(answers)
+    answers = collect_fmkorea()
+    if any(v == UNKNOWN for v in answers.values()):
+        answers = collect_ppomppu(answers)
+    print("Final answers:", answers)
     return answers
 
 
-def load_status() -> dict | None:
-    if not os.path.exists(STATUS_FILE):
-        return None
-    try:
-        with open(STATUS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
-
-
 def save_status(answers: dict[str, str], checked_at: str) -> None:
-    missing = [name for name, answer in answers.items() if answer == UNKNOWN]
-    payload = {
-        "date": today(),
-        "all_found": not missing,
-        "missing_items": missing,
-        "checked_at": checked_at,
-    }
+    missing = [k for k, v in answers.items() if v == UNKNOWN]
     with open(STATUS_FILE, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+        json.dump({"date": today(), "all_found": not missing, "missing_items": missing, "checked_at": checked_at}, f, ensure_ascii=False, indent=2)
 
 
 def build_message(answers: dict[str, str], mode: str) -> str:
-    title = "오늘의 앱테크 퀴즈 정답"
-    if mode == "retry":
-        title += " 오후 6시 재확인"
-    lines = [title, today(), ""]
-    for item in ITEMS:
-        lines.append(f"{item} 정답 : {answers[item]}")
-    return "\n".join(lines)
+    title = "오늘의 앱테크 퀴즈 정답" + (" 오후 6시 재확인" if mode == "retry" else "")
+    return "\n".join([title, today(), ""] + [f"{item} 정답 : {answers[item]}" for item in ITEMS])
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["noon", "retry"], required=True)
     args = parser.parse_args()
-
-    if args.mode == "retry":
-        status = load_status()
-        if status and status.get("date") == today() and status.get("all_found") is True:
-            print("No retry needed: all answers were found at noon.")
-            return
-
+    if args.mode == "retry" and os.path.exists(STATUS_FILE):
+        try:
+            status = json.load(open(STATUS_FILE, encoding="utf-8"))
+            if status.get("date") == today() and status.get("all_found") is True:
+                print("No retry needed: all answers were found at noon.")
+                return
+        except Exception:
+            pass
     answers = collect_answers()
     save_status(answers, "18:00" if args.mode == "retry" else "12:00")
     send_kakao(build_message(answers, args.mode))
