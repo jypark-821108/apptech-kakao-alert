@@ -112,6 +112,49 @@ def clean_answer(raw: str) -> str | None:
     return value
 
 
+def shinhan_slot(title: str) -> str:
+    n = norm(title)
+    if any(key in n for key in ["골드리슈", "골드테크", "gold"]):
+        return "gold"
+    if any(key in n for key in ["팡팡", "pangang", "sol페이", "쏠페이"]):
+        return "pang"
+    if any(key in n for key in ["쏠퀴즈", "쏠야구", "신한쏠", "슈퍼sol", "출석"]):
+        return "sol"
+    return "other"
+
+
+def clean_shinhan_answer(raw: str, title: str) -> str | None:
+    answer = clean_answer(raw)
+    if not answer:
+        return None
+    slot = shinhan_slot(title)
+    answer = re.sub(r"^(?:쏠퀴즈|쏠야구|쏠|팡팡|출석|슈퍼SOL|신한퀴즈)\s*", "", answer, flags=re.I)
+    answer = re.sub(r"^\d+\s*번\s*", "", answer)
+    if slot == "pang":
+        m = re.search(r"(\d+\s*(?:개월|월|일|년|원|명|회|점|개|%))", answer)
+        if m:
+            answer = m.group(1)
+    answer = compact(answer)
+    if not answer or len(answer) > 50:
+        return None
+    return answer
+
+
+def join_shinhan_parts(parts: list[tuple[str, str]]) -> str | None:
+    order = ["gold", "sol", "pang", "other"]
+    picked: dict[str, str] = {}
+    extras: list[str] = []
+    for slot, answer in parts:
+        if slot in picked:
+            continue
+        if slot == "other":
+            extras.append(answer)
+        else:
+            picked[slot] = answer
+    ordered = [picked[slot] for slot in order if slot in picked] + extras
+    return " / ".join(ordered) if ordered else None
+
+
 def extract_answer(text: str) -> str | None:
     lines = [compact(x) for x in re.split(r"[\r\n]+", text or "") if compact(x)]
     patterns = [r"정답\s*[:：은는]?\s*(.+)$", r"정답은\s*(.+)$", r"답\s*[:：은는]?\s*(.+)$"]
@@ -231,10 +274,11 @@ window.chrome = window.chrome || { runtime: {} };
                     for pid, title in matches:
                         ans = fm_post_answer(page, pid)
                         if ans:
-                            label = "쏠" if "쏠" in title else "팡팡" if "팡팡" in title else "출석" if "출석" in title else "신한"
-                            parts.append(f"{label} {ans}")
+                            clean = clean_shinhan_answer(ans, title)
+                            if clean:
+                                parts.append((shinhan_slot(title), clean))
                     if parts:
-                        answers[item] = " / ".join(parts)
+                        answers[item] = join_shinhan_parts(parts) or UNKNOWN
                     continue
                 for pid, _ in matches:
                     ans = fm_post_answer(page, pid)
@@ -360,13 +404,16 @@ def collect_ppomppu(existing: dict[str, str]) -> dict[str, str]:
                 ans = ppomppu_answer(pid, item)
                 if not ans:
                     continue
-                label = "쏠" if "쏠" in title else "팡팡" if "팡팡" in title else "출석" if "출석" in title or "슈퍼SOL" in title else "신한"
-                if label in seen_labels:
+                slot = shinhan_slot(title)
+                if slot in seen_labels:
                     continue
-                seen_labels.add(label)
-                parts.append(f"{label} {ans}")
+                clean = clean_shinhan_answer(ans, title)
+                if not clean:
+                    continue
+                seen_labels.add(slot)
+                parts.append((slot, clean))
             if parts:
-                answers[item] = " / ".join(parts)
+                answers[item] = join_shinhan_parts(parts) or UNKNOWN
             continue
         for pid, _ in candidates:
             ans = ppomppu_answer(pid, item)
