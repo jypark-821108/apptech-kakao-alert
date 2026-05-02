@@ -214,6 +214,72 @@ def extract_english_sentences(text: str) -> str | None:
     return " / ".join(seen[:3]) if seen else None
 
 
+def clean_monimo_piece(raw: str) -> str | None:
+    value = compact(raw)
+    value = re.sub(r"^(?:정답|답)\s*[:：은는]?\s*", "", value, flags=re.I)
+    value = re.sub(r"^[①-⑤0-9]+[.)번\s]+", "", value)
+    value = compact(value)
+    if not value:
+        return None
+    if any(noise in value for noise in ["모니모", "영어", "퀴즈", "오늘", "표현", "참고", "댓글", "조회", "추천", "스크랩"]):
+        return None
+    if not re.search(r"[A-Za-z]", value):
+        return None
+    value = value.strip(" -:：[]()\".,")
+    if len(value) > 35:
+        return None
+    return value
+
+
+def extract_monimo_answer(text: str) -> str | None:
+    fixed = html.unescape(text or "").replace("|", "I")
+    lower = fixed.lower()
+    phrase_map = [
+        ("no hard feelings", "hard"),
+        ("there's no bad blood", "no bad"),
+        ("there is no bad blood", "no bad"),
+        ("no bad blood", "no bad"),
+        ("i can't forgive you", "can't forgive"),
+        ("i can’t forgive you", "can't forgive"),
+        ("can't forgive", "can't forgive"),
+        ("can’t forgive", "can't forgive"),
+    ]
+    mapped: list[str] = []
+    for phrase, answer in phrase_map:
+        if phrase in lower and answer not in mapped:
+            mapped.append(answer)
+    if len(mapped) >= 2:
+        return " / ".join(mapped[:3])
+
+    lines = [compact(x) for x in re.split(r"[\r\n]+", fixed) if compact(x)]
+    for i, line in enumerate(lines):
+        if re.fullmatch(r"(?:정답|답)\s*[:：]?", line, flags=re.I):
+            pieces: list[str] = []
+            for nxt in lines[i + 1:i + 8]:
+                if any(stop in nxt for stop in ["예문", "해석", "참고", "댓글", "조회", "추천", "스크랩", "첨부파일", "목록"]):
+                    break
+                piece = clean_monimo_piece(nxt)
+                if piece and piece not in pieces:
+                    pieces.append(piece)
+                if len(pieces) >= 3:
+                    break
+            if pieces:
+                return " / ".join(pieces)
+
+        m = re.search(r"(?:정답|답)\s*[:：은는]?\s*(.+)$", line, flags=re.I)
+        if m:
+            chunks = re.split(r"\s*/\s*|,\s*| {2,}", m.group(1))
+            pieces: list[str] = []
+            for chunk in chunks:
+                piece = clean_monimo_piece(chunk)
+                if piece and piece not in pieces:
+                    pieces.append(piece)
+            if pieces:
+                return " / ".join(pieces[:3])
+
+    return " / ".join(mapped[:3]) if mapped else extract_english_sentences(text)
+
+
 def parse_fm_posts(page_html: str) -> list[tuple[str, str]]:
     soup = BeautifulSoup(page_html, "html.parser")
     posts: list[tuple[str, str]] = []
@@ -272,7 +338,7 @@ window.chrome = window.chrome || { runtime: {} };
                 if item == "신한퀴즈":
                     parts = []
                     for pid, title in matches:
-                        ans = fm_post_answer(page, pid)
+                        ans = fm_post_answer(page, pid, item)
                         if ans:
                             clean = clean_shinhan_answer(ans, title)
                             if clean:
@@ -281,7 +347,7 @@ window.chrome = window.chrome || { runtime: {} };
                         answers[item] = join_shinhan_parts(parts) or UNKNOWN
                     continue
                 for pid, _ in matches:
-                    ans = fm_post_answer(page, pid)
+                    ans = fm_post_answer(page, pid, item)
                     if ans:
                         answers[item] = ans
                         break
@@ -292,14 +358,14 @@ window.chrome = window.chrome || { runtime: {} };
     return answers
 
 
-def fm_post_answer(page, pid: str) -> str | None:
+def fm_post_answer(page, pid: str, item: str | None = None) -> str | None:
     try:
         page.goto(FM_POST.format(pid), wait_until="domcontentloaded", timeout=45000)
         text = wait_fm(page)
         if "에펨코리아 보안 시스템" in text or "사람인지 확인" in text:
             print(f"FMKorea post {pid} blocked")
             return None
-        ans = extract_answer(text)
+        ans = extract_monimo_answer(text) if item == "모니모 영어 퀴즈" else extract_answer(text)
         print(f"FMKorea post {pid} answer: {ans}")
         return ans
     except Exception as exc:
@@ -381,9 +447,11 @@ def ppomppu_answer(pid: str, item: str | None = None) -> str | None:
         soup = BeautifulSoup(req(PP_POST.format(pid)), "html.parser")
         meta = soup.select_one('meta[name="description"]') or soup.select_one('meta[property="og:description"]')
         desc = meta.get("content", "") if meta else ""
-        ans = extract_answer(desc + "\n" + soup.get_text("\n", strip=True))
+        source_text = desc + "\n" + soup.get_text("\n", strip=True)
+        ans = extract_monimo_answer(source_text) if item == "모니모 영어 퀴즈" else extract_answer(source_text)
         if not ans and item == "모니모 영어 퀴즈":
-            ans = ocr_image_answer(image_url_from_soup(soup))
+            ocr = ocr_image_answer(image_url_from_soup(soup))
+            ans = extract_monimo_answer(ocr or "") if ocr else None
         print(f"Ppomppu post {pid} answer: {ans}")
         return ans
     except Exception as exc:
