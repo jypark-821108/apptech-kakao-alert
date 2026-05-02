@@ -21,10 +21,28 @@ HEADERS = {
 
 BASE_QUERIES = ["용인시", "용인특례시", "용인 처인구", "용인 모현", "모현읍", "처인구 모현읍"]
 GOOGLE_QUERIES = [q + " when:1d" for q in BASE_QUERIES[:3]] + [q + " when:7d" for q in BASE_QUERIES[3:]]
-REGION_WORDS = ["용인", "용인시", "용인특례시", "처인", "모현", "모현읍"]
-PRESS_RELEASE_HINTS = ["보도자료", "releasecopy", "용인시 제공", "용인특례시 제공", "용인시청 전경", "밝혔다", "추진한다", "개최한다", "운영한다", "모집한다"]
+REGION_WORDS = ["용인", "용인시", "용인특례시", "처인", "처인구", "모현", "모현읍"]
 PAGE_PATH = Path("docs/newsletter.html")
 DEFAULT_PAGE_URL = "https://jypark-821108.github.io/apptech-kakao-alert/newsletter.html"
+
+OFFICIAL_SUBJECTS = [
+    "용인시", "용인특례시", "처인구", "기흥구", "수지구", "용인시의회", "용인도시공사",
+    "용인문화재단", "용인시청", "용인교육지원청", "경기도", "경기도교육청",
+]
+PR_VERBS = [
+    "밝혔다", "전했다", "설명했다", "덧붙였다", "나선다", "추진", "개최", "운영", "실시",
+    "모집", "선정", "지원", "체결", "완료", "제공", "열었다", "연다", "착수", "확대",
+    "조성", "진행", "배포", "안내", "홍보", "당부", "기념", "참여자", "대상으로",
+]
+DIRECT_PR_HINTS = [
+    "보도자료", "releasecopy", "사진=용인", "용인시 제공", "용인특례시 제공", "처인구 제공",
+    "시 관계자", "구 관계자", "시는 ", "용인시는", "용인특례시는", "처인구는",
+]
+COMMON_TOPIC_WORDS = {
+    "용인", "용인시", "용인특례시", "처인", "처인구", "기흥", "기흥구", "수지", "수지구",
+    "모현", "모현읍", "경기", "경기도", "오늘", "뉴스", "기자", "종합", "단독", "포토",
+    "관련", "추진", "개최", "운영", "실시", "지원", "모집", "선정", "사업", "행사",
+}
 
 
 def now() -> datetime:
@@ -224,14 +242,64 @@ def is_region_article(article: dict) -> bool:
     return any(word in text for word in REGION_WORDS)
 
 
-def similarity_key(title: str) -> str:
-    words = [w for w in normalize(title).split() if len(w) > 1]
-    return " ".join(words[:8])
+def title_tokens(text: str) -> set[str]:
+    tokens = set()
+    for word in normalize(text).split():
+        if len(word) <= 1 or word in COMMON_TOPIC_WORDS:
+            continue
+        tokens.add(word)
+    return tokens
 
 
-def likely_press_release(article: dict, duplicate_sources: int) -> bool:
-    text = article["title"] + " " + article["snippet"] + " " + article.get("link", "")
-    return any(hint in text for hint in PRESS_RELEASE_HINTS) or duplicate_sources >= 3
+def same_topic(left: dict, right: dict) -> bool:
+    a = title_tokens(left["title"] + " " + left.get("snippet", "")[:120])
+    b = title_tokens(right["title"] + " " + right.get("snippet", "")[:120])
+    if not a or not b:
+        return False
+    overlap = len(a & b)
+    smaller = min(len(a), len(b))
+    union = len(a | b)
+    return overlap >= 3 and (overlap / smaller >= 0.55 or overlap / union >= 0.42)
+
+
+def group_candidates(candidates: list[dict]) -> list[list[dict]]:
+    groups: list[list[dict]] = []
+    for article in candidates:
+        placed = False
+        for group in groups:
+            if any(same_topic(article, existing) for existing in group):
+                group.append(article)
+                placed = True
+                break
+        if not placed:
+            groups.append([article])
+    return groups
+
+
+def official_press_release_score(article: dict) -> int:
+    text = article["title"] + " " + article.get("snippet", "") + " " + article.get("link", "")
+    score = 0
+    if any(hint in text for hint in DIRECT_PR_HINTS):
+        score += 2
+    if any(subject in text for subject in OFFICIAL_SUBJECTS):
+        score += 1
+    verb_hits = sum(1 for verb in PR_VERBS if verb in text)
+    score += min(verb_hits, 3)
+    if re.search(r"(업무협약|MOU|간담회|캠페인|교육|공모|참여자|수강생|대상자|착공식|준공식)", text):
+        score += 1
+    return score
+
+
+def likely_press_release(article: dict, group: list[dict]) -> bool:
+    sources = {g["source"] for g in group}
+    score = official_press_release_score(article)
+    if score >= 4:
+        return True
+    if len(sources) >= 2 and score >= 2:
+        return True
+    if len(sources) >= 3:
+        return True
+    return False
 
 
 def collect_articles() -> tuple[list[dict], list[dict]]:
@@ -255,30 +323,25 @@ def collect_articles() -> tuple[list[dict], list[dict]]:
         if is_target_date(article) and is_region_article(article):
             candidates.append(article)
 
-    groups: dict[str, list[dict]] = {}
-    for article in candidates:
-        groups.setdefault(similarity_key(article["title"]), []).append(article)
-
     included: list[dict] = []
     excluded: list[dict] = []
-    used_titles = set()
-    for group in groups.values():
-        group_sources = {g["source"] for g in group}
+    used_topics: list[dict] = []
+    for group in group_candidates(candidates):
+        group.sort(key=lambda x: x.get("published") or datetime(1970, 1, 1, tzinfo=KST), reverse=True)
         article = group[0]
-        key = normalize(article["title"])
-        if key in used_titles:
+        if any(same_topic(article, used) for used in used_topics):
             continue
-        if likely_press_release(article, len(group_sources)):
+        if likely_press_release(article, group):
             excluded.extend(group)
         else:
             included.append(article)
-            used_titles.add(key)
+            used_topics.append(article)
 
     included.sort(key=lambda x: x.get("published") or datetime(1970, 1, 1, tzinfo=KST), reverse=True)
     excluded.sort(key=lambda x: x.get("published") or datetime(1970, 1, 1, tzinfo=KST), reverse=True)
     print("Included local news:", [(a["channel"], a["published"].isoformat() if a.get("published") else "", a["source"], a["title"]) for a in included])
-    print("Excluded local news:", [(a["channel"], a["published"].isoformat() if a.get("published") else "", a["source"], a["title"]) for a in excluded[:10]])
-    return included[:12], excluded[:8]
+    print("Excluded local news:", [(a["channel"], a["published"].isoformat() if a.get("published") else "", a["source"], a["title"]) for a in excluded[:20]])
+    return included[:12], excluded[:12]
 
 
 def article_url(article: dict) -> str:
@@ -308,7 +371,7 @@ def render_excluded(excluded: list[dict]) -> str:
     if not excluded:
         return ""
     items = []
-    for article in excluded[:6]:
+    for article in excluded[:8]:
         items.append(f"<li>{esc(shorten(article['title'], 80))} <span>{esc(article['source'])}</span></li>")
     return "<section class='excluded'><h2>보도자료·중복으로 제외</h2><ul>" + "".join(items) + "</ul></section>"
 
@@ -363,7 +426,7 @@ def write_page(articles: list[dict], excluded: list[dict]) -> None:
 
 
 def build_message(articles: list[dict], page_url: str) -> str:
-    return f"용인·모현 오늘 뉴스\n{today()}\n새 기사 {len(articles)}건 정리 완료\n자세히 보기: {page_url}"
+    return f"용인·모현 오늘 뉴스\n{today()}\n자체 기사 후보 {len(articles)}건 정리 완료\n자세히 보기: {page_url}"
 
 
 def main() -> None:
