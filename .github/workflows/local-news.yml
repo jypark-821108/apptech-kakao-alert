@@ -2,8 +2,8 @@ name: Yongin Mohyeon Newsletter
 
 on:
   schedule:
-    # Korea time 19:00
-    - cron: '0 10 * * *'
+    # Korea time 19:17. Avoid minute 0 because GitHub Actions schedules can be delayed at the top of the hour.
+    - cron: '17 10 * * *'
   workflow_dispatch:
 
 permissions:
