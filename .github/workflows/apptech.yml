@@ -2,10 +2,10 @@ name: Apptech Kakao Alert
 
 on:
   schedule:
-    # Korea time 12:00
-    - cron: '0 3 * * *'
-    # Korea time 18:00, retry only when answers were missing
-    - cron: '0 9 * * *'
+    # Korea time 12:15, avoids GitHub's crowded top-of-hour scheduler
+    - cron: '15 3 * * *'
+    # Korea time 18:15, retry only when answers were missing
+    - cron: '15 9 * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -37,7 +37,7 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "mode=${{ inputs.mode }}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event.schedule }}" = "0 9 * * *" ]; then
+          elif [ "${{ github.event.schedule }}" = "15 9 * * *" ]; then
             echo "mode=retry" >> "$GITHUB_OUTPUT"
           else
             echo "mode=noon" >> "$GITHUB_OUTPUT"
