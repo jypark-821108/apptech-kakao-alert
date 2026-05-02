@@ -98,9 +98,13 @@ def is_today_title(title: str) -> bool:
 
 def clean_answer(raw: str) -> str | None:
     value = compact(raw)
-    value = re.split(r"(?:입니다|입니당|참고|출처|댓글|추천|조회|스크랩|정답 입력 전|모든 분들|즐거운|감사|\||<)", value)[0]
+    value = re.split(
+        r"(?:PS\.?|P\.S\.?|쏠픽|잊지 말고|같이 하세요|입니다|입니당|참고|출처|댓글|추천|조회|스크랩|정답 입력 전|모든 분들|즐거운|감사|\||<)",
+        value,
+        flags=re.I,
+    )[0]
     value = compact(value)
-    if not value or len(value) > 120:
+    if not value or len(value) > 80:
         return None
     bad_words = ["확인", "퀴즈", "정답", "게시판", "링크", "댓글", "본문", "쿠폰", "참여", "이미지"]
     if any(bad in value for bad in bad_words):
@@ -122,7 +126,7 @@ def extract_answer(text: str) -> str | None:
         if re.fullmatch(r"(?:정답|답)\s*[:：]?", line, flags=re.I):
             pieces: list[str] = []
             for nxt in lines[i + 1:i + 4]:
-                if any(stop in nxt for stop in ["참고", "댓글", "추천", "조회", "스크랩", "안녕하세요"]):
+                if any(stop in nxt for stop in ["참고", "댓글", "추천", "조회", "스크랩", "안녕하세요", "PS", "쏠픽"]):
                     break
                 cand = clean_answer(nxt)
                 if cand:
@@ -144,11 +148,23 @@ def extract_answer(text: str) -> str | None:
 def extract_english_sentences(text: str) -> str | None:
     fixed = text.replace("|", "I").replace("\n", " ")
     fixed = re.sub(r"\s+", " ", fixed)
-    candidates = re.findall(r"\b(?:I|There|This|That|You|We|They|He|She)[A-Za-z0-9' ,;-]{3,90}[.!?]", fixed)
+    known = [
+        "No hard feelings",
+        "There's no bad blood",
+        "I can't forgive you",
+    ]
+    found = [phrase for phrase in known if phrase.lower() in fixed.lower()]
+    if found:
+        return " / ".join(found)
+
+    candidates = re.findall(r"\b(?:I|There|This|That|You|We|They|He|She|No)[A-Za-z0-9' ,;-]{3,90}[.!?]", fixed)
     seen: list[str] = []
     for sent in candidates:
         sent = compact(sent)
+        sent = re.sub(r"^(?:He\s+MS\s+|H[eE]\s+MS\s+|It\s+means\s+)", "", sent).strip()
         if any(noise in sent.lower() for noise in ["google", "cookie", "script", "ppomppu"]):
+            continue
+        if re.fullmatch(r"[A-Za-z ]{1,6}", sent):
             continue
         if sent not in seen:
             seen.append(sent)
