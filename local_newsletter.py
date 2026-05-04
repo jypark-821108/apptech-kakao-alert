@@ -30,6 +30,14 @@ DATA_DIR = Path("docs/news-data")
 DEFAULT_PAGE_URL = "https://jypark-821108.github.io/apptech-kakao-alert/newsletter.html"
 BASE_PAGE_URL = "https://jypark-821108.github.io/apptech-kakao-alert"
 
+
+def google_queries() -> list[str]:
+    if os.environ.get("TARGET_DATE", "").strip():
+        after = target_date()
+        before = (target_datetime() + timedelta(days=1)).strftime("%Y-%m-%d")
+        return [f"{q} after:{after} before:{before}" for q in BASE_QUERIES]
+    return GOOGLE_QUERIES
+
 OFFICIAL_SUBJECTS = [
     "용인시", "용인특례시", "처인구", "기흥구", "수지구", "용인시의회", "용인도시공사",
     "용인문화재단", "용인시청", "용인교육지원청", "경기도", "경기도교육청",
@@ -55,7 +63,19 @@ def now() -> datetime:
 
 
 def today() -> str:
+    return target_date()
+
+
+def target_date() -> str:
+    value = os.environ.get("TARGET_DATE", "").strip()
+    if value:
+        datetime.strptime(value, "%Y-%m-%d")
+        return value
     return now().strftime("%Y-%m-%d")
+
+
+def target_datetime() -> datetime:
+    return datetime.strptime(target_date(), "%Y-%m-%d").replace(tzinfo=KST)
 
 
 def compact(text: str) -> str:
@@ -124,7 +144,7 @@ def parse_pubdate(value: str) -> datetime | None:
 
 def parse_portal_date(text: str) -> datetime | None:
     text = compact(text)
-    current = now()
+    current = target_datetime()
     if re.search(r"\d+\s*(분|시간)\s*전", text) or "오늘" in text:
         return current
     if "어제" in text or re.search(r"\d+\s*일\s*전", text):
@@ -239,7 +259,7 @@ def zum_news(query: str) -> list[dict]:
 
 def is_target_date(article: dict) -> bool:
     pub = article.get("published")
-    return bool(pub and pub.strftime("%Y-%m-%d") == today())
+    return bool(pub and pub.strftime("%Y-%m-%d") == target_date())
 
 
 def is_region_article(article: dict) -> bool:
@@ -309,7 +329,7 @@ def likely_press_release(article: dict, group: list[dict]) -> bool:
 
 def collect_articles() -> tuple[list[dict], list[dict]]:
     raw: list[dict] = []
-    for query in GOOGLE_QUERIES:
+    for query in google_queries():
         raw.extend(google_news(query))
     for query in BASE_QUERIES:
         raw.extend(naver_news(query))
@@ -524,7 +544,7 @@ def write_page(articles: list[dict], excluded: list[dict]) -> None:
     PAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
     DAILY_DIR.mkdir(parents=True, exist_ok=True)
     generated_at = now().strftime("%Y-%m-%d %H:%M")
-    date_text = today()
+    date_text = target_date()
     save_daily_data(date_text, generated_at, articles, excluded)
     page = render_page(date_text, generated_at, articles, excluded)
     PAGE_PATH.write_text(page, encoding="utf-8")
@@ -533,7 +553,8 @@ def write_page(articles: list[dict], excluded: list[dict]) -> None:
 
 def build_message(articles: list[dict], page_url: str) -> str:
     yongin_articles, mohyeon_articles = split_sections(articles)
-    return f"용인·모현 오늘 뉴스\n{today()}\n용인 {len(yongin_articles)}건 · 모현 {len(mohyeon_articles)}건 정리 완료\n자세히 보기: {page_url}"
+    prefix = "[누락분 재발송] " if os.environ.get("TARGET_DATE", "").strip() else ""
+    return f"{prefix}용인·모현 오늘 뉴스\n{target_date()}\n용인 {len(yongin_articles)}건 · 모현 {len(mohyeon_articles)}건 정리 완료\n자세히 보기: {page_url}"
 
 
 def main() -> None:
