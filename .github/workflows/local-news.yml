@@ -2,8 +2,12 @@ name: Yongin Mohyeon Newsletter
 
 on:
   schedule:
-    # Korea time 19:17. Avoid minute 0 because GitHub Actions schedules can be delayed at the top of the hour.
+    # Korea time 19:17 primary run. Extra runs are backups because GitHub scheduled workflows can be skipped.
     - cron: '17 10 * * *'
+    # Korea time 19:47 backup run. Skips automatically if today's newsletter was already sent.
+    - cron: '47 10 * * *'
+    # Korea time 20:17 final backup run. Skips automatically if today's newsletter was already sent.
+    - cron: '17 11 * * *'
   workflow_dispatch:
 
 permissions:
@@ -14,23 +18,48 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Check duplicate newsletter
+        id: newsletter_guard
+        shell: bash
+        run: |
+          today=$(TZ=Asia/Seoul date +%F)
+          echo "today=$today" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] && [ -f local-news-status.json ] && grep -q "\"date\": \"$today\"" local-news-status.json; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Today's newsletter was already sent. Skipping backup run."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/setup-python@v5
+        if: steps.newsletter_guard.outputs.skip != 'true'
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
+        if: steps.newsletter_guard.outputs.skip != 'true'
       - name: Build and send local newsletter
+        if: steps.newsletter_guard.outputs.skip != 'true'
         env:
           KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
           KAKAO_REFRESH_TOKEN: ${{ secrets.KAKAO_REFRESH_TOKEN }}
           NEWSLETTER_URL: https://jypark-821108.github.io/apptech-kakao-alert/newsletter.html
         run: python local_newsletter.py
-      - name: Commit newsletter page
-        if: always()
+      - name: Mark newsletter sent
+        if: steps.newsletter_guard.outputs.skip != 'true'
+        shell: bash
         run: |
-          if [ -f docs/newsletter.html ]; then
+          cat > local-news-status.json <<EOF
+          {
+            "date": "${{ steps.newsletter_guard.outputs.today }}",
+            "sent_at": "$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M:%S %Z')"
+          }
+          EOF
+      - name: Commit newsletter page
+        if: steps.newsletter_guard.outputs.skip != 'true' && always()
+        run: |
+          if [ -f docs/newsletter.html ] || [ -f local-news-status.json ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add docs/newsletter.html
+            git add docs/newsletter.html local-news-status.json
             git diff --cached --quiet || git commit -m "Update local newsletter page"
             git push
           fi
