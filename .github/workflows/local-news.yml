@@ -9,6 +9,12 @@ on:
     # Korea time 20:17 final backup run. Skips automatically if today's newsletter was already sent.
     - cron: '17 11 * * *'
   workflow_dispatch:
+    inputs:
+      target_date:
+        description: 'Optional backfill date, e.g. 2026-05-04'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
@@ -42,14 +48,19 @@ jobs:
           KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
           KAKAO_REFRESH_TOKEN: ${{ secrets.KAKAO_REFRESH_TOKEN }}
           NEWSLETTER_URL: https://jypark-821108.github.io/apptech-kakao-alert/newsletter.html
+          TARGET_DATE: ${{ inputs.target_date }}
         run: python local_newsletter.py
       - name: Mark newsletter sent
         if: steps.newsletter_guard.outputs.skip != 'true'
         shell: bash
         run: |
+          sent_date="${{ inputs.target_date }}"
+          if [ -z "$sent_date" ]; then
+            sent_date="${{ steps.newsletter_guard.outputs.today }}"
+          fi
           cat > local-news-status.json <<EOF
           {
-            "date": "${{ steps.newsletter_guard.outputs.today }}",
+            "date": "$sent_date",
             "sent_at": "$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M:%S %Z')"
           }
           EOF
