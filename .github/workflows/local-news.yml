@@ -59,7 +59,7 @@ jobs:
           if [ -f docs/newsletter.html ] || [ -f local-news-status.json ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add docs/newsletter.html local-news-status.json
+            git add docs/newsletter.html docs/news docs/news-data local-news-status.json
             git diff --cached --quiet || git commit -m "Update local newsletter page"
             git push
           fi
