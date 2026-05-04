@@ -3,6 +3,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import quote_plus, urlparse
 import html
+import json
 import os
 import re
 import traceback
@@ -22,8 +23,12 @@ HEADERS = {
 BASE_QUERIES = ["용인시", "용인특례시", "용인 처인구", "용인 모현", "모현읍", "처인구 모현읍"]
 GOOGLE_QUERIES = [q + " when:1d" for q in BASE_QUERIES[:3]] + [q + " when:7d" for q in BASE_QUERIES[3:]]
 REGION_WORDS = ["용인", "용인시", "용인특례시", "처인", "처인구", "모현", "모현읍"]
+MOHYEON_WORDS = ["모현", "모현읍", "왕산리", "능원리", "동림리", "초부리", "갈담리", "매산리", "오산리", "일산리"]
 PAGE_PATH = Path("docs/newsletter.html")
+DAILY_DIR = Path("docs/news")
+DATA_DIR = Path("docs/news-data")
 DEFAULT_PAGE_URL = "https://jypark-821108.github.io/apptech-kakao-alert/newsletter.html"
+BASE_PAGE_URL = "https://jypark-821108.github.io/apptech-kakao-alert"
 
 OFFICIAL_SUBJECTS = [
     "용인시", "용인특례시", "처인구", "기흥구", "수지구", "용인시의회", "용인도시공사",
@@ -348,9 +353,81 @@ def article_url(article: dict) -> str:
     return article.get("link") or "#"
 
 
-def render_articles(articles: list[dict]) -> str:
+def article_record(article: dict) -> dict:
+    pub = article.get("published")
+    return {
+        "title": article.get("title", ""),
+        "source": article.get("source", ""),
+        "link": article.get("link", ""),
+        "channel": article.get("channel", ""),
+        "snippet": article.get("snippet", ""),
+        "published": pub.isoformat() if pub else "",
+    }
+
+
+def article_from_record(record: dict) -> dict:
+    article = dict(record)
+    pub = article.get("published")
+    if isinstance(pub, str) and pub:
+        try:
+            article["published"] = datetime.fromisoformat(pub)
+        except ValueError:
+            article["published"] = None
+    else:
+        article["published"] = None
+    return article
+
+
+def is_mohyeon_article(article: dict) -> bool:
+    text = article.get("title", "") + " " + article.get("snippet", "")
+    return any(word in text for word in MOHYEON_WORDS)
+
+
+def split_sections(articles: list[dict]) -> tuple[list[dict], list[dict]]:
+    mohyeon = [article for article in articles if is_mohyeon_article(article)]
+    yongin = [article for article in articles if not is_mohyeon_article(article)]
+    return yongin, mohyeon
+
+
+def archive_dates() -> list[str]:
+    if not DATA_DIR.exists():
+        return []
+    return sorted([path.stem for path in DATA_DIR.glob("*.json")], reverse=True)
+
+
+def archive_nav(active_date: str) -> str:
+    dates = archive_dates()
+    if active_date not in dates:
+        dates = [active_date] + dates
+    options = []
+    for date in dates:
+        selected = " selected" if date == active_date else ""
+        options.append(f'<option value="{esc(BASE_PAGE_URL + "/news/" + date + ".html")}"{selected}>{esc(date)}</option>')
+    return f"""
+    <div class="archive-bar">
+      <label for="date-select">날짜별 뉴스</label>
+      <select id="date-select" onchange="if(this.value) location.href=this.value">
+        {''.join(options)}
+      </select>
+      <a class="latest" href="{esc(BASE_PAGE_URL + '/newsletter.html')}">최신</a>
+    </div>
+    """
+
+
+def save_daily_data(date_text: str, generated_at: str, articles: list[dict], excluded: list[dict]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    data = {
+        "date": date_text,
+        "generated_at": generated_at,
+        "articles": [article_record(article) for article in articles],
+        "excluded": [article_record(article) for article in excluded],
+    }
+    (DATA_DIR / f"{date_text}.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def render_articles(articles: list[dict], empty_text: str = "확인된 자체 취재 추정 기사는 없습니다.") -> str:
     if not articles:
-        return '<p class="empty">오늘 확인된 자체 취재 추정 기사는 없습니다.</p>'
+        return f'<p class="empty">{esc(empty_text)}</p>'
     cards = []
     for article in articles:
         pub = article.get("published")
@@ -367,6 +444,15 @@ def render_articles(articles: list[dict]) -> str:
     return "\n".join(cards)
 
 
+def render_section(title: str, articles: list[dict], empty_text: str) -> str:
+    return f"""
+    <section class="news-section">
+      <div class="section-head"><h2>{esc(title)}</h2><span>{len(articles)}건</span></div>
+      {render_articles(articles, empty_text)}
+    </section>
+    """
+
+
 def render_excluded(excluded: list[dict]) -> str:
     if not excluded:
         return ""
@@ -376,9 +462,8 @@ def render_excluded(excluded: list[dict]) -> str:
     return "<section class='excluded'><h2>보도자료·중복으로 제외</h2><ul>" + "".join(items) + "</ul></section>"
 
 
-def write_page(articles: list[dict], excluded: list[dict]) -> None:
-    PAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    generated_at = now().strftime("%Y-%m-%d %H:%M")
+def render_page(date_text: str, generated_at: str, articles: list[dict], excluded: list[dict]) -> str:
+    yongin_articles, mohyeon_articles = split_sections(articles)
     page = f"""<!doctype html>
 <html lang="ko">
 <head>
@@ -394,8 +479,16 @@ def write_page(articles: list[dict], excluded: list[dict]) -> None:
     h1 {{ margin:0 0 8px; font-size:26px; letter-spacing:0; }}
     .sub {{ margin:0; color:#cbd5e1; font-size:14px; }}
     main {{ padding:16px; }}
+    .archive-bar {{ display:flex; align-items:center; gap:8px; margin:0 0 14px; padding:12px; background:white; border:1px solid var(--line); border-radius:8px; }}
+    .archive-bar label {{ font-size:13px; font-weight:800; color:#374151; }}
+    .archive-bar select {{ flex:1; min-width:0; height:38px; border:1px solid var(--line); border-radius:6px; padding:0 10px; background:white; font-size:14px; }}
+    .archive-bar .latest {{ color:var(--accent); font-size:13px; font-weight:800; text-decoration:none; }}
     .summary {{ display:flex; gap:8px; flex-wrap:wrap; margin:0 0 12px; }}
     .pill {{ background:#e6f4ef; color:#0b5d4d; border:1px solid #cbe7dd; border-radius:999px; padding:7px 10px; font-size:13px; font-weight:700; }}
+    .news-section {{ margin:16px 0 20px; }}
+    .section-head {{ display:flex; justify-content:space-between; align-items:center; gap:10px; margin:0 0 8px; }}
+    .section-head h2 {{ margin:0; font-size:18px; letter-spacing:0; }}
+    .section-head span {{ color:var(--muted); font-size:13px; font-weight:800; }}
     .news-card {{ background:var(--card); border:1px solid var(--line); border-radius:8px; margin:8px 0; overflow:hidden; }}
     .news-card a {{ display:block; color:inherit; text-decoration:none; padding:14px; }}
     .news-card h2 {{ margin:0 0 8px; font-size:17px; line-height:1.35; letter-spacing:0; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }}
@@ -412,21 +505,35 @@ def write_page(articles: list[dict], excluded: list[dict]) -> None:
   </style>
 </head>
 <body>
-  <header><div class="wrap"><h1>용인·모현 오늘 뉴스</h1><p class="sub">{esc(today())} · 생성 {esc(generated_at)}</p></div></header>
+  <header><div class="wrap"><h1>용인·모현 오늘 뉴스</h1><p class="sub">{esc(date_text)} · 생성 {esc(generated_at)}</p></div></header>
   <main><div class="wrap">
-    <div class="summary"><span class="pill">기사 {len(articles)}건</span><span class="pill">제외 {len(excluded)}건</span></div>
-    {render_articles(articles)}
+    {archive_nav(date_text)}
+    <div class="summary"><span class="pill">용인 {len(yongin_articles)}건</span><span class="pill">모현 {len(mohyeon_articles)}건</span><span class="pill">제외 {len(excluded)}건</span></div>
+    {render_section("용인 소식", yongin_articles, "오늘 확인된 용인 자체 취재 추정 기사는 없습니다.")}
+    {render_section("모현 소식", mohyeon_articles, "오늘 확인된 모현 자체 취재 추정 기사는 없습니다.")}
     {render_excluded(excluded)}
     <footer>검색원: Google News, Naver, Daum, Zum</footer>
   </div></main>
 </body>
 </html>
 """
+    return page
+
+
+def write_page(articles: list[dict], excluded: list[dict]) -> None:
+    PAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DAILY_DIR.mkdir(parents=True, exist_ok=True)
+    generated_at = now().strftime("%Y-%m-%d %H:%M")
+    date_text = today()
+    save_daily_data(date_text, generated_at, articles, excluded)
+    page = render_page(date_text, generated_at, articles, excluded)
     PAGE_PATH.write_text(page, encoding="utf-8")
+    (DAILY_DIR / f"{date_text}.html").write_text(page, encoding="utf-8")
 
 
 def build_message(articles: list[dict], page_url: str) -> str:
-    return f"용인·모현 오늘 뉴스\n{today()}\n자체 기사 후보 {len(articles)}건 정리 완료\n자세히 보기: {page_url}"
+    yongin_articles, mohyeon_articles = split_sections(articles)
+    return f"용인·모현 오늘 뉴스\n{today()}\n용인 {len(yongin_articles)}건 · 모현 {len(mohyeon_articles)}건 정리 완료\n자세히 보기: {page_url}"
 
 
 def main() -> None:
