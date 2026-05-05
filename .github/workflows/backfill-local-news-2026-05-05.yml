@@ -51,3 +51,5 @@ jobs:
           git add docs/newsletter.html docs/news docs/news-data local-news-status.json
           git diff --cached --quiet || git commit -m "Backfill local newsletter for 2026-05-05"
           git push
+
+# trigger: 2026-05-05 retry
