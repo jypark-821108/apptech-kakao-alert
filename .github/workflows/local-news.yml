@@ -29,7 +29,16 @@ jobs:
         shell: bash
         run: |
           today=$(TZ=Asia/Seoul date +%F)
+          hour=$(TZ=Asia/Seoul date +%H)
+          target_date="${{ inputs.target_date }}"
           echo "today=$today" >> "$GITHUB_OUTPUT"
+
+          if [ -z "$target_date" ] && [ "$hour" -lt 18 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "It is before 18:00 KST. Skipping local newsletter so news can accumulate."
+            exit 0
+          fi
+
           if [ "${{ github.event_name }}" != "workflow_dispatch" ] && [ -f local-news-status.json ] && grep -q "\"date\": \"$today\"" local-news-status.json; then
             article_count=$(python - <<PY
           import json, pathlib
