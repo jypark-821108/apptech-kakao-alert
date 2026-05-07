@@ -35,3 +35,5 @@ jobs:
           git add docs/newsletter.html docs/news docs/news-data
           git diff --cached --quiet || git commit -m "Archive local newsletter for 2026-05-07"
           git push
+
+# trigger: 2026-05-07 archive
