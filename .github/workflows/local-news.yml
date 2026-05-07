@@ -2,12 +2,12 @@ name: Yongin Mohyeon Newsletter
 
 on:
   schedule:
-    # Korea time 19:17 primary run. Extra runs are backups because GitHub scheduled workflows can be skipped.
-    - cron: '17 10 * * *'
-    # Korea time 19:47 backup run. Skips automatically if today's newsletter was already sent with articles.
-    - cron: '47 10 * * *'
-    # Korea time 20:17 final backup run. Skips automatically if today's newsletter was already sent with articles.
-    - cron: '17 11 * * *'
+    # Korea time 18:37 and 18:52. GitHub scheduled workflows can be skipped, so we provide repeated chances.
+    - cron: '37,52 9 * * *'
+    # Korea time 19:07 through 21:52 every 15 minutes. Duplicate guard sends at most once after 18:00 KST.
+    - cron: '7,22,37,52 10-12 * * *'
+    # Korea time 22:07 and 22:22 final backups.
+    - cron: '7,22 13 * * *'
   workflow_dispatch:
     inputs:
       target_date:
@@ -40,22 +40,33 @@ jobs:
           fi
 
           if [ "${{ github.event_name }}" != "workflow_dispatch" ] && [ -f local-news-status.json ] && grep -q "\"date\": \"$today\"" local-news-status.json; then
-            article_count=$(python - <<PY
-          import json, pathlib
-          path = pathlib.Path('docs/news-data') / '$today.json'
+            status=$(python - <<PY
+          import json, pathlib, re
+          status_path = pathlib.Path('local-news-status.json')
+          data_path = pathlib.Path('docs/news-data') / '$today.json'
           try:
-              data = json.loads(path.read_text(encoding='utf-8'))
-              print(len(data.get('articles') or []))
+              status = json.loads(status_path.read_text(encoding='utf-8'))
           except Exception:
-              print(0)
+              status = {}
+          try:
+              data = json.loads(data_path.read_text(encoding='utf-8'))
+              article_count = len(data.get('articles') or [])
+          except Exception:
+              article_count = 0
+          sent_at = str(status.get('sent_at') or '')
+          m = re.search(r'\b(\d{2}):(\d{2}):(\d{2})\b', sent_at)
+          sent_hour = int(m.group(1)) if m else -1
+          print(f'{article_count},{sent_hour}')
           PY
             )
-            if [ "$article_count" -gt 0 ]; then
+            article_count=${status%,*}
+            sent_hour=${status#*,}
+            if [ "$article_count" -gt 0 ] && [ "$sent_hour" -ge 18 ]; then
               echo "skip=true" >> "$GITHUB_OUTPUT"
-              echo "Today's newsletter was already sent with $article_count articles. Skipping backup run."
+              echo "Today's newsletter was already sent after 18:00 KST with $article_count articles. Skipping backup run."
             else
               echo "skip=false" >> "$GITHUB_OUTPUT"
-              echo "Today's previous newsletter had no articles. Running again."
+              echo "Previous newsletter was empty or sent before 18:00 KST. Running again."
             fi
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
