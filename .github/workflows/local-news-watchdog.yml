@@ -2,6 +2,9 @@ name: Yongin Mohyeon Newsletter Watchdog
 
 on:
   schedule:
+    # Korea time 08:13 and 09:13. Morning catch-up for yesterday if every evening run was missed.
+    - cron: '13 23 * * *'
+    - cron: '13 0 * * *'
     # Korea time 20:13, 21:13, 22:13, 23:13. Independent backup for missed scheduled runs.
     - cron: '13 11 * * *'
     - cron: '13 12 * * *'
@@ -30,20 +33,31 @@ jobs:
         id: guard
         run: |
           today=$(TZ=Asia/Seoul date +%F)
+          yesterday=$(TZ=Asia/Seoul date -d 'yesterday' +%F)
           hour=$(TZ=Asia/Seoul date +%H)
           echo "today=$today" >> "$GITHUB_OUTPUT"
 
+          target_kind="today"
+          target_date="$today"
+          target_env=""
+          page_url="https://jypark-821108.github.io/apptech-kakao-alert/newsletter.html"
+
           if [ "$hour" -lt 18 ]; then
-            echo "send=false" >> "$GITHUB_OUTPUT"
-            echo "Before 18:00 KST. Watchdog will not send yet."
-            exit 0
+            target_kind="yesterday"
+            target_date="$yesterday"
+            target_env="$yesterday"
+            page_url="https://jypark-821108.github.io/apptech-kakao-alert/news/$yesterday.html"
           fi
+
+          echo "target_date=$target_date" >> "$GITHUB_OUTPUT"
+          echo "target_env=$target_env" >> "$GITHUB_OUTPUT"
+          echo "page_url=$page_url" >> "$GITHUB_OUTPUT"
 
           status=$(python - <<PY
           import json, pathlib, re
-          today = '$today'
+          target = '$target_date'
           status_path = pathlib.Path('local-news-status.json')
-          data_path = pathlib.Path('docs/news-data') / f'{today}.json'
+          data_path = pathlib.Path('docs/news-data') / f'{target}.json'
           try:
               status = json.loads(status_path.read_text(encoding='utf-8'))
           except Exception:
@@ -64,12 +78,22 @@ jobs:
           article_count=$(echo "$status" | cut -d, -f2)
           sent_hour=$(echo "$status" | cut -d, -f3)
 
-          if [ "$sent_date" = "$today" ] && [ "$article_count" -gt 0 ] && [ "$sent_hour" -ge 18 ]; then
-            echo "send=false" >> "$GITHUB_OUTPUT"
-            echo "Today's local newsletter already exists and was sent after 18:00 KST."
+          if [ "$target_kind" = "today" ]; then
+            if [ "$sent_date" = "$today" ] && [ "$article_count" -gt 0 ] && [ "$sent_hour" -ge 18 ]; then
+              echo "send=false" >> "$GITHUB_OUTPUT"
+              echo "Today's local newsletter already exists and was sent after 18:00 KST."
+            else
+              echo "send=true" >> "$GITHUB_OUTPUT"
+              echo "Today's local newsletter is missing or only has an early/empty run. Watchdog will send."
+            fi
           else
-            echo "send=true" >> "$GITHUB_OUTPUT"
-            echo "Today's local newsletter is missing or only has an early/empty run. Watchdog will send."
+            if [ "$sent_date" = "$yesterday" ] && [ "$article_count" -gt 0 ]; then
+              echo "send=false" >> "$GITHUB_OUTPUT"
+              echo "Yesterday's local newsletter already exists. Morning catch-up is not needed."
+            else
+              echo "send=true" >> "$GITHUB_OUTPUT"
+              echo "Yesterday's local newsletter is missing. Morning catch-up will send the archived date link."
+            fi
           fi
       - uses: actions/setup-python@v5
         if: steps.guard.outputs.send == 'true'
@@ -82,15 +106,16 @@ jobs:
         env:
           KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
           KAKAO_REFRESH_TOKEN: ${{ secrets.KAKAO_REFRESH_TOKEN }}
-          NEWSLETTER_URL: https://jypark-821108.github.io/apptech-kakao-alert/newsletter.html
+          NEWSLETTER_URL: ${{ steps.guard.outputs.page_url }}
+          TARGET_DATE: ${{ steps.guard.outputs.target_env }}
         run: python local_newsletter.py
       - name: Mark newsletter sent
         if: steps.guard.outputs.send == 'true'
         run: |
-          today="${{ steps.guard.outputs.today }}"
+          target_date="${{ steps.guard.outputs.target_date }}"
           article_count=$(python - <<PY
           import json, pathlib
-          path = pathlib.Path('docs/news-data') / '$today.json'
+          path = pathlib.Path('docs/news-data') / '$target_date.json'
           try:
               data = json.loads(path.read_text(encoding='utf-8'))
               print(len(data.get('articles') or []))
@@ -100,7 +125,7 @@ jobs:
           )
           cat > local-news-status.json <<EOF
           {
-            "date": "$today",
+            "date": "$target_date",
             "sent_at": "$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M:%S %Z')",
             "article_count": $article_count,
             "source": "watchdog"
