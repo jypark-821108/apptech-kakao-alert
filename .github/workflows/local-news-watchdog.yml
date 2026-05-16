@@ -1,0 +1,118 @@
+name: Yongin Mohyeon Newsletter Watchdog
+
+on:
+  schedule:
+    # Korea time 20:13, 21:13, 22:13, 23:13. Independent backup for missed scheduled runs.
+    - cron: '13 11 * * *'
+    - cron: '13 12 * * *'
+    - cron: '13 13 * * *'
+    - cron: '13 14 * * *'
+  workflow_run:
+    workflows:
+      - Apptech Kakao Alert
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  send-if-missing:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check whether local newsletter is missing
+        id: guard
+        run: |
+          today=$(TZ=Asia/Seoul date +%F)
+          hour=$(TZ=Asia/Seoul date +%H)
+          echo "today=$today" >> "$GITHUB_OUTPUT"
+
+          if [ "$hour" -lt 18 ]; then
+            echo "send=false" >> "$GITHUB_OUTPUT"
+            echo "Before 18:00 KST. Watchdog will not send yet."
+            exit 0
+          fi
+
+          status=$(python - <<PY
+          import json, pathlib, re
+          today = '$today'
+          status_path = pathlib.Path('local-news-status.json')
+          data_path = pathlib.Path('docs/news-data') / f'{today}.json'
+          try:
+              status = json.loads(status_path.read_text(encoding='utf-8'))
+          except Exception:
+              status = {}
+          try:
+              data = json.loads(data_path.read_text(encoding='utf-8'))
+              article_count = len(data.get('articles') or [])
+          except Exception:
+              article_count = 0
+          sent_date = str(status.get('date') or '')
+          sent_at = str(status.get('sent_at') or '')
+          m = re.search(r'\b(\d{2}):(\d{2}):(\d{2})\b', sent_at)
+          sent_hour = int(m.group(1)) if m else -1
+          print(f'{sent_date},{article_count},{sent_hour}')
+          PY
+          )
+          sent_date=$(echo "$status" | cut -d, -f1)
+          article_count=$(echo "$status" | cut -d, -f2)
+          sent_hour=$(echo "$status" | cut -d, -f3)
+
+          if [ "$sent_date" = "$today" ] && [ "$article_count" -gt 0 ] && [ "$sent_hour" -ge 18 ]; then
+            echo "send=false" >> "$GITHUB_OUTPUT"
+            echo "Today's local newsletter already exists and was sent after 18:00 KST."
+          else
+            echo "send=true" >> "$GITHUB_OUTPUT"
+            echo "Today's local newsletter is missing or only has an early/empty run. Watchdog will send."
+          fi
+      - uses: actions/setup-python@v5
+        if: steps.guard.outputs.send == 'true'
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+        if: steps.guard.outputs.send == 'true'
+      - name: Build and send local newsletter
+        if: steps.guard.outputs.send == 'true'
+        env:
+          KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
+          KAKAO_REFRESH_TOKEN: ${{ secrets.KAKAO_REFRESH_TOKEN }}
+          NEWSLETTER_URL: https://jypark-821108.github.io/apptech-kakao-alert/newsletter.html
+        run: python local_newsletter.py
+      - name: Mark newsletter sent
+        if: steps.guard.outputs.send == 'true'
+        run: |
+          today="${{ steps.guard.outputs.today }}"
+          article_count=$(python - <<PY
+          import json, pathlib
+          path = pathlib.Path('docs/news-data') / '$today.json'
+          try:
+              data = json.loads(path.read_text(encoding='utf-8'))
+              print(len(data.get('articles') or []))
+          except Exception:
+              print(0)
+          PY
+          )
+          cat > local-news-status.json <<EOF
+          {
+            "date": "$today",
+            "sent_at": "$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M:%S %Z')",
+            "article_count": $article_count,
+            "source": "watchdog"
+          }
+          EOF
+      - name: Commit newsletter page
+        if: steps.guard.outputs.send == 'true' && always()
+        run: |
+          if [ -f docs/newsletter.html ] || [ -f local-news-status.json ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add docs/newsletter.html docs/news docs/news-data local-news-status.json
+            git diff --cached --quiet || git commit -m "Update local newsletter page from watchdog"
+            git push
+          fi
